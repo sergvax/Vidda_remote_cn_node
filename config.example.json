@@ -1,0 +1,12 @@
+{
+  "ip": "",
+  "clientId": "",
+  "name": "",
+  "model": "HiSmart",
+  "macs": [],
+  "sources": [
+    { "id": "3", "name": "HDMI 1" },
+    { "id": "4", "name": "HDMI 2" },
+    { "id": "0", "name": "ТВ" }
+  ]
+}

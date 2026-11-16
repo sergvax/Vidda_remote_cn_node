@@ -1,0 +1,10 @@
+node_modules/
+config.json
+server.log
+*.log
+.DS_Store
+.env
+.env.*
+shots/
+__pycache__/
+*.pyc

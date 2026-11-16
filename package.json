@@ -1,0 +1,27 @@
+{
+  "name": "vidda-remote-cn-node",
+  "version": "1.1.0",
+  "private": true,
+  "description": "Локальный веб-пульт для китайского проектора Vidda (Hisense): MQTT, скриншоты, входы, Wake-on-LAN",
+  "license": "MIT",
+  "type": "module",
+  "main": "server.js",
+  "keywords": [
+    "vidda",
+    "hisense",
+    "vidaa",
+    "projector",
+    "mqtt",
+    "remote"
+  ],
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "mqtt": "^5.14.1"
+  }
+}
