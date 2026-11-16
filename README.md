@@ -39,9 +39,11 @@
 
 ## Быстрый старт
 
-Нужен Node.js 18+.
+Нужен Node.js 18+ и Git.
 
 ```bash
+git clone https://github.com/sergvax/Vidda_remote_cn_node.git
+cd Vidda_remote_cn_node
 npm install
 npm start
 ```
