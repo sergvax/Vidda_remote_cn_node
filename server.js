@@ -16,7 +16,9 @@ import http from 'node:http';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import dgram from 'node:dgram';
+import net from 'node:net';
 import os from 'node:os';
+import crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import mqtt from 'mqtt';
 
@@ -66,6 +68,7 @@ const state = {
   mqttConnected: false,
   lastError: null,
   discovering: false,
+  discoveryMethod: null,
   statetype: null,
   lastState: null,
   currentApp: null,
@@ -84,6 +87,23 @@ let lastShot = null;
 // Конфигурация
 // ---------------------------------------------------------------------------
 
+function randomId(prefix = 'vidda_remote') {
+  return `${prefix}_${crypto.randomBytes(6).toString('hex')}`;
+}
+
+/**
+ * clientId нужен только как идентификатор в топиках. Проектор принимает
+ * произвольный clientId (проверено: KEY_SETTING и screenshot работают),
+ * поэтому UDN из DLNA больше не обязателен.
+ */
+function ensureClientId() {
+  if (!state.clientId) {
+    state.clientId = randomId();
+    return true;
+  }
+  return false;
+}
+
 async function loadConfig() {
   try {
     const raw = await fs.readFile(CONFIG_FILE, 'utf8');
@@ -97,6 +117,7 @@ async function loadConfig() {
   } catch {
     // первый запуск — конфига ещё нет
   }
+  ensureClientId();
 }
 
 async function saveConfig() {
@@ -120,12 +141,17 @@ function ssdpSearch(timeoutMs = 3500) {
     const socket = dgram.createSocket({ type: 'udp4', reuseAddr: true });
     const locations = new Set();
 
-    const message = Buffer.from(
-      'M-SEARCH * HTTP/1.1\r\n' +
-        'HOST: 239.255.255.250:1900\r\n' +
-        'MAN: "ssdp:discover"\r\n' +
-        'MX: 2\r\n' +
-        'ST: urn:schemas-upnp-org:device:MediaRenderer:1\r\n\r\n'
+    const messages = [
+      'urn:schemas-upnp-org:device:MediaRenderer:1',
+      'ssdp:all',
+    ].map((st) =>
+      Buffer.from(
+        'M-SEARCH * HTTP/1.1\r\n' +
+          'HOST: 239.255.255.250:1900\r\n' +
+          'MAN: "ssdp:discover"\r\n' +
+          'MX: 2\r\n' +
+          `ST: ${st}\r\n\r\n`
+      )
     );
 
     socket.on('message', (msg) => {
@@ -138,7 +164,9 @@ function ssdpSearch(timeoutMs = 3500) {
     socket.bind(() => {
       try {
         socket.setBroadcast(true);
-        socket.send(message, 1900, '239.255.255.250');
+        for (const message of messages) {
+          socket.send(message, 1900, '239.255.255.250');
+        }
       } catch {
         /* ignore */
       }
@@ -163,21 +191,265 @@ function parseDescription(xml) {
     return m ? m[1].trim() : null;
   };
 
-  const udn = pick(/<UDN>\s*uuid:([0-9a-f-]+)\s*<\/UDN>/i);
   const friendlyName = pick(/<friendlyName>([^<]*)<\/friendlyName>/i);
   const modelName = pick(/<modelName>([^<]*)<\/modelName>/i);
   const cap = pick(/<modelDescription>([\s\S]*?)<\/modelDescription>/i) || '';
 
   const ip = cap.match(/\bip=([0-9.]+)/)?.[1] || null;
   const mqttPort = Number(cap.match(/\bmqttport=(\d+)/)?.[1] || 0) || MQTT_PORT;
+  const isVidaa =
+    /vidda|hisense|hismart|海信/i.test(`${friendlyName || ''} ${modelName || ''}`) ||
+    /mqttport=|transport_protocol|vidaa_support/i.test(cap) ||
+    /<modelName>\s*HiSmart\s*<\/modelName>/i.test(xml);
 
   return {
-    clientId: udn ? udn.replace(/-/g, '').toLowerCase() : null,
     friendlyName: friendlyName || null,
     modelName: modelName || null,
     ip,
     mqttPort,
+    isVidaa,
   };
+}
+
+/** SSDP: ищем UPnP-описание и берём IP из LOCATION. */
+async function ssdpDiscover(timeoutMs = 3000) {
+  const locations = await ssdpSearch(timeoutMs);
+  const found = [];
+
+  for (const location of locations) {
+    try {
+      const xml = await fetchDescription(location);
+      const info = parseDescription(xml);
+      if (!info.isVidaa) continue;
+
+      let ip = info.ip;
+      if (!ip) {
+        try {
+          ip = new URL(location).hostname;
+        } catch {
+          /* ignore */
+        }
+      }
+      if (!ip || !/^\d+\.\d+\.\d+\.\d+$/.test(ip)) continue;
+
+      found.push({
+        ip,
+        name: info.friendlyName,
+        model: info.modelName,
+        method: 'ssdp',
+      });
+    } catch {
+      /* устройство не ответило — пропускаем */
+    }
+  }
+
+  return found;
+}
+
+function localIPv4Interfaces() {
+  const result = [];
+  for (const list of Object.values(os.networkInterfaces())) {
+    for (const net of list || []) {
+      if (net.family === 'IPv4' && !net.internal) result.push(net);
+    }
+  }
+  return result;
+}
+
+function broadcastAddresses() {
+  const list = new Set(['255.255.255.255']);
+  for (const iface of localIPv4Interfaces()) {
+    list.add(`${iface.address.split('.').slice(0, 3).join('.')}.255`);
+  }
+  return [...list];
+}
+
+const UDP_DISCOVERY_PORT = 36671;
+
+/** UDP-broadcast Hisense на порт 36671 (на случай, если SSDP выключен). */
+function udpDiscover(timeoutMs = 2200) {
+  return new Promise((resolve) => {
+    const socket = dgram.createSocket({ type: 'udp4', reuseAddr: true });
+    const found = new Map();
+    const local = new Set(localIPv4Interfaces().map((i) => i.address));
+    const messages = [
+      JSON.stringify({ request: 'discover' }),
+      JSON.stringify({ request: 'discover', device: 'phone', version: '1.0' }),
+      'HiSmart:discover',
+      '{}',
+    ];
+
+    socket.on('message', (msg, rinfo) => {
+      if (local.has(rinfo.address)) return;
+      const text = msg.toString('utf8').trim();
+      let data = {};
+      try {
+        data = JSON.parse(text);
+      } catch {
+        /* не JSON */
+      }
+      const name = data.devicename || data.name || data.device_name || null;
+      const model = data.model || data.model_name || null;
+      const mac = data.mac || data.macaddress || null;
+      const looksVidaa =
+        name || model || /hisense|vidda|hismart|海信/i.test(text);
+      if (!looksVidaa) return;
+      found.set(rinfo.address, {
+        ip: rinfo.address,
+        name,
+        model,
+        mac,
+        method: 'udp',
+      });
+    });
+
+    socket.on('error', () => {});
+    let bound = false;
+
+    const send = () => {
+      for (const target of broadcastAddresses()) {
+        for (const body of messages) {
+          try {
+            socket.send(Buffer.from(body), UDP_DISCOVERY_PORT, target);
+          } catch {
+            /* ignore */
+          }
+        }
+      }
+    };
+
+    const start = () => {
+      try { socket.setBroadcast(true); } catch { /* ignore */ }
+      send();
+    };
+
+    // Если 36671 занят другим приложением — слушаем на произвольном порту.
+    socket.once('error', () => {
+      if (!bound) {
+        try {
+          socket.bind(0, () => {
+            bound = true;
+            start();
+          });
+        } catch {
+          /* ignore */
+        }
+      }
+    });
+
+    socket.bind(UDP_DISCOVERY_PORT, () => {
+      bound = true;
+      start();
+    });
+
+    setTimeout(() => {
+      try { socket.close(); } catch { /* ignore */ }
+      resolve([...found.values()]);
+    }, timeoutMs);
+  });
+}
+
+function portOpen(ip, port, timeoutMs = 400) {
+  return new Promise((resolve) => {
+    const socket = net.connect({ host: ip, port });
+    let settled = false;
+    const finish = (ok) => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      resolve(ok);
+    };
+    socket.setTimeout(timeoutMs);
+    socket.once('connect', () => finish(true));
+    socket.once('timeout', () => finish(false));
+    socket.once('error', () => finish(false));
+  });
+}
+
+/** Сканируем локальные /24 на открытый MQTT-порт проектора. */
+async function scanForMqtt(timeoutMs = 9000) {
+  const hosts = new Set();
+  const own = new Set();
+  for (const iface of localIPv4Interfaces()) {
+    own.add(iface.address);
+    const prefix = iface.address.split('.').slice(0, 3).join('.');
+    for (let i = 1; i <= 254; i += 1) {
+      const host = `${prefix}.${i}`;
+      if (host !== iface.address) hosts.add(host);
+    }
+  }
+
+  const list = [...hosts];
+  const open = [];
+  let index = 0;
+  const deadline = Date.now() + timeoutMs;
+
+  const worker = async () => {
+    while (index < list.length && Date.now() < deadline) {
+      const host = list[index];
+      index += 1;
+      if (await portOpen(host, MQTT_PORT, 400)) open.push(host);
+    }
+  };
+
+  await Promise.all(Array.from({ length: 64 }, worker));
+  return open;
+}
+
+/**
+ * Проверяем, что по IP действительно проектор: подключаемся к MQTT
+ * и ждём ответ sendcastinfo на getcastinfo. Заодно получаем MAC для WoL.
+ */
+function probeProjector(ip, timeoutMs = 5000) {
+  return new Promise((resolve) => {
+    const cid = randomId('vidda_probe');
+    const client = mqtt.connect(`mqtt://${ip}:${MQTT_PORT}`, {
+      protocolVersion: 5,
+      username: MQTT_USER,
+      password: MQTT_PASS,
+      clientId: randomId('vidda_probe_srv'),
+      keepalive: 20,
+      reconnectPeriod: 0,
+      connectTimeout: timeoutMs,
+      clean: true,
+    });
+
+    let settled = false;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      try { client.end(true); } catch { /* ignore */ }
+      resolve(result);
+    };
+
+    const timer = setTimeout(() => finish(null), timeoutMs);
+
+    client.on('connect', () => {
+      client.subscribe(`/remoteapp/mobile/${cid}/hiservice/data/sendcastinfo`, { qos: 0 });
+      client.publish(
+        `/remoteapp/tv/hiservice_cmd/${cid}/actions/getcastinfo`,
+        'GET_CAST_INFO',
+        { qos: 0 }
+      );
+      // Если sendcastinfo не пришёл, но MQTT-соединение есть — это всё равно
+      // может быть проектор. Не блокируем ручное подключение.
+      setTimeout(() => finish({ mac: null }), 1800);
+    });
+
+    client.on('message', (topic, payload) => {
+      if (!topic.endsWith('/sendcastinfo')) return;
+      let mac = null;
+      try {
+        mac = JSON.parse(payload.toString('utf8')).btAddress || null;
+      } catch {
+        /* ignore */
+      }
+      finish({ mac });
+    });
+
+    client.on('error', () => {});
+  });
 }
 
 async function discover() {
@@ -186,37 +458,41 @@ async function discover() {
   state.lastError = null;
 
   try {
-    const locations = await ssdpSearch();
-    const candidates = [];
+    const [ssdp, udp] = await Promise.all([ssdpDiscover(3000), udpDiscover(2000)]);
+    const candidates = [...ssdp, ...udp];
 
-    for (const location of locations) {
-      try {
-        const xml = await fetchDescription(location);
-        if (!/mqttport=/i.test(xml)) continue;
-        const info = parseDescription(xml);
-        if (!info.ip || !info.clientId) continue;
-        candidates.push(info);
-      } catch {
-        /* устройство не ответило — пропускаем */
+    let best = candidates.find((c) =>
+      /vidda|hisense|hismart|海信/i.test(`${c.name || ''} ${c.model || ''}`)
+    ) || candidates[0] || null;
+
+    // SSDP/DLNA на некоторых прошивках выключены, а MQTT работает.
+    // Тогда ищем открытый порт 36669 в локальной сети и проверяем getcastinfo.
+    if (!best) {
+      const ips = await scanForMqtt();
+      for (const ip of ips) {
+        const probe = await probeProjector(ip);
+        if (probe) {
+          best = { ip, mac: probe.mac, method: 'scan' };
+          break;
+        }
       }
     }
 
-    if (!candidates.length) {
-      state.lastError = 'Проектор не найден в сети (SSDP). Проверь, что он включён и в той же сети.';
+    if (!best) {
+      state.lastError =
+        'Проектор не найден. Включи его, проверь, что он в той же Wi-Fi сети, ' +
+        'или введи IP вручную (Настройки проектора → Сеть).';
       return;
     }
 
-    // Предпочитаем устройство с именем vidda/hisense
-    const best =
-      candidates.find((c) => /vidda|hisense|海信/i.test(`${c.friendlyName} ${c.modelName}`)) ||
-      candidates[0];
-
     state.ip = best.ip;
-    state.clientId = best.clientId;
-    state.name = best.friendlyName || 'Vidda';
-    state.model = best.modelName || null;
+    if (best.name) state.name = best.name;
+    if (best.model) state.model = best.model;
+    if (best.mac && !state.macs.length) state.macs = [best.mac];
+    state.discoveryMethod = best.method || null;
 
     await saveConfig();
+    ensureClientId();
     connectMqtt();
   } finally {
     state.discovering = false;
@@ -231,6 +507,7 @@ function responseTopics() {
   const cid = state.clientId;
   return [
     `/remoteapp/mobile/${cid}/hiservice/data/screenshot`,
+    `/remoteapp/mobile/${cid}/hiservice/data/sendcastinfo`,
     `/remoteapp/mobile/broadcast/ui_service/state`,
     `/remoteapp/mobile/broadcast/platform_service/actions/volumechange`,
     `/remoteapp/mobile/broadcast/ui_service/volume`,
@@ -240,10 +517,11 @@ function responseTopics() {
 }
 
 function connectMqtt() {
-  if (!state.ip || !state.clientId) {
-    state.lastError = 'Нет IP или client ID — нужно обнаружение.';
+  if (!state.ip) {
+    state.lastError = 'Нет IP проектора — нужно обнаружение или ручное подключение.';
     return;
   }
+  ensureClientId();
 
   if (mqttClient) {
     try { mqttClient.end(true); } catch { /* ignore */ }
@@ -267,6 +545,14 @@ function connectMqtt() {
     state.lastError = null;
     for (const topic of responseTopics()) {
       mqttClient.subscribe(topic, { qos: 0 });
+    }
+    // MAC для Wake-on-LAN: проектор отдаёт btAddress в sendcastinfo.
+    if (!state.macs.length) {
+      mqttClient.publish(
+        `/remoteapp/tv/hiservice_cmd/${state.clientId}/actions/getcastinfo`,
+        'GET_CAST_INFO',
+        { qos: 0 }
+      );
     }
     console.log(`[mqtt] подключено к ${url}, clientId=${state.clientId}`);
   });
@@ -306,6 +592,20 @@ function handleMessage(topic, payload) {
   }
 
   const text = payload.toString('utf8').trim();
+
+  if (topic.endsWith('/hiservice/data/sendcastinfo')) {
+    try {
+      const data = JSON.parse(text);
+      const mac = data.btAddress || data.mac || null;
+      if (mac && !state.macs.includes(mac)) {
+        state.macs = [...new Set([...state.macs, mac])];
+        saveConfig();
+      }
+    } catch {
+      /* ignore */
+    }
+    return;
+  }
 
   if (topic.endsWith('/broadcast/hiservice/data/appswitch')) {
     try {
@@ -565,6 +865,7 @@ const server = http.createServer(async (req, res) => {
         sources: state.sources,
         mqttConnected: state.mqttConnected,
         discovering: state.discovering,
+        discoveryMethod: state.discoveryMethod,
         lastError: state.lastError,
         statetype: state.statetype,
         currentApp: state.currentApp,
@@ -582,6 +883,7 @@ const server = http.createServer(async (req, res) => {
         ip: state.ip,
         clientId: state.clientId,
         name: state.name,
+        method: state.discoveryMethod,
         lastError: state.lastError,
       });
     }
@@ -618,8 +920,45 @@ const server = http.createServer(async (req, res) => {
     }
 
     if (url.pathname === '/api/connect' && req.method === 'POST') {
+      const body = await readBody(req);
+      const ip = String(body.ip || '').trim();
+
+      if (ip) {
+        const valid =
+          /^\d{1,3}(\.\d{1,3}){3}$/.test(ip) &&
+          ip.split('.').every((part) => Number(part) <= 255);
+        if (!valid) {
+          return json(res, 400, { error: 'Некорректный IP-адрес' });
+        }
+
+        const probe = await probeProjector(ip, 4500);
+        if (!probe) {
+          return json(res, 400, {
+            error:
+              'По этому IP проектор не отвечает по MQTT. Проверь адрес и что проектор включён.',
+          });
+        }
+
+        state.ip = ip;
+        state.discoveryMethod = 'manual';
+        state.lastError = null;
+        if (probe.mac && !state.macs.length) state.macs = [probe.mac];
+        await saveConfig();
+      }
+
+      if (!state.ip) {
+        return json(res, 400, { error: 'Не указан IP проектора' });
+      }
+
+      ensureClientId();
       connectMqtt();
-      return json(res, 200, { ok: true });
+      await new Promise((resolve) => setTimeout(resolve, 1200));
+      return json(res, 200, {
+        ok: true,
+        ip: state.ip,
+        mqttConnected: state.mqttConnected,
+        lastError: state.lastError,
+      });
     }
 
     if (url.pathname.startsWith('/api/')) {

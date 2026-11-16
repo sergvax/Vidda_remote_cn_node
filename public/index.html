@@ -44,7 +44,7 @@
         <div class="brand-sub" id="deviceName">проектор</div>
       </div>
       <div class="top-right">
-        <button class="status" id="statusBtn" title="Обновить подключение">
+        <button class="status" id="statusBtn" title="Подключение к проектору">
           <span class="dot" id="dot"></span>
           <span id="statusText">соединение…</span>
         </button>
@@ -148,6 +148,21 @@
         <button class="btn ghost" id="sourceHome">Домой</button>
         <button class="btn ghost" id="sourceCancel">Отмена</button>
       </div>
+    </div>
+  </div>
+
+  <!-- Подключение -->
+  <div class="modal" id="connectModal" hidden>
+    <div class="modal-card">
+      <div class="modal-icon neutral"><svg><use href="#i-refresh"/></svg></div>
+      <h2>Подключение к проектору</h2>
+      <p>Пульт ищет проектор по SSDP, UDP и открытому MQTT-порту в локальной сети. Если автопоиск не сработал, введи IP вручную — он указан в настройках проектора: <b>Сеть → IP-адрес</b>.</p>
+      <input class="field" id="ipInput" inputmode="decimal" placeholder="192.168.1.50" autocomplete="off" spellcheck="false">
+      <div class="modal-actions">
+        <button class="btn ghost" id="autoFind"><svg class="btn-icon"><use href="#i-refresh"/></svg>Найти</button>
+        <button class="btn accent" id="manualConnect">Подключить</button>
+      </div>
+      <button class="btn ghost wide" id="connectCancel">Отмена</button>
     </div>
   </div>
 

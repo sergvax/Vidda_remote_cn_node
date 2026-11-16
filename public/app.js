@@ -20,6 +20,12 @@ const sourceCancel = document.getElementById('sourceCancel');
 const sourceHome = document.getElementById('sourceHome');
 const sourceList = document.getElementById('sourceList');
 
+const connectModal = document.getElementById('connectModal');
+const ipInput = document.getElementById('ipInput');
+const autoFind = document.getElementById('autoFind');
+const manualConnect = document.getElementById('manualConnect');
+const connectCancel = document.getElementById('connectCancel');
+
 const screenModal = document.getElementById('screenModal');
 const screenBtn = document.getElementById('screenBtn');
 const screenClose = document.getElementById('screenClose');
@@ -32,6 +38,7 @@ let toastTimer = null;
 let lastStatus = null;
 let screenUrl = null;
 let screenBusy = false;
+let connectPrompted = false;
 
 function buzz(ms = 8) {
   try { navigator.vibrate?.(ms); } catch { /* ignore */ }
@@ -145,7 +152,12 @@ const KEYBOARD_MAP = {
 };
 
 function anyModalOpen() {
-  return !powerModal.hidden || !sourceModal.hidden || !screenModal.hidden;
+  return (
+    !powerModal.hidden ||
+    !sourceModal.hidden ||
+    !connectModal.hidden ||
+    !screenModal.hidden
+  );
 }
 
 window.addEventListener('keydown', (e) => {
@@ -211,6 +223,10 @@ async function refreshStatus() {
     } else {
       banner.hidden = true;
     }
+    if (!info.ip && !info.discovering && info.lastError && !connectPrompted) {
+      connectPrompted = true;
+      openConnect();
+    }
   } catch {
     dot.className = 'dot offline';
     statusText.textContent = 'нет сервера';
@@ -223,27 +239,78 @@ async function rediscover() {
   toast('Ищу проектор в сети…');
   dot.className = 'dot';
   statusText.textContent = 'поиск…';
+  autoFind.disabled = true;
   try {
     const info = await api('/api/discover', { method: 'POST' });
     if (info.ip) {
       toast(`Найден: ${info.name || 'Vidda'} (${info.ip})`);
+      closeModals();
     } else {
       toast(info.lastError || 'Проектор не найден', 'error');
     }
     await refreshStatus();
   } catch (err) {
     toast(err.message, 'error');
+  } finally {
+    autoFind.disabled = false;
   }
 }
 
-statusBtn.addEventListener('click', rediscover);
+/* ---------- connect ---------- */
+
+function openConnect() {
+  if (lastStatus?.ip) ipInput.value = lastStatus.ip;
+  connectModal.hidden = false;
+  setTimeout(() => ipInput.focus(), 80);
+}
+
+async function manualConnectNow() {
+  const ip = ipInput.value.trim();
+  if (!ip) {
+    toast('Введи IP проектора', 'error');
+    ipInput.focus();
+    return;
+  }
+
+  manualConnect.disabled = true;
+  manualConnect.textContent = 'Подключаю…';
+  try {
+    const info = await api('/api/connect', {
+      method: 'POST',
+      body: JSON.stringify({ ip }),
+    });
+    toast(info.mqttConnected ? 'Проектор подключён' : 'IP сохранён, жду соединение');
+    closeModals();
+    await refreshStatus();
+  } catch (err) {
+    toast(err.message, 'error');
+  } finally {
+    manualConnect.disabled = false;
+    manualConnect.textContent = 'Подключить';
+  }
+}
+
+statusBtn.addEventListener('click', openConnect);
 refreshBtn.addEventListener('click', rediscover);
+autoFind.addEventListener('click', rediscover);
+manualConnect.addEventListener('click', manualConnectNow);
+connectCancel.addEventListener('click', closeModals);
+connectModal.addEventListener('click', (e) => {
+  if (e.target === connectModal) closeModals();
+});
+ipInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    manualConnectNow();
+  }
+});
 
 /* ---------- modal helpers ---------- */
 
 function closeModals() {
   powerModal.hidden = true;
   sourceModal.hidden = true;
+  connectModal.hidden = true;
   closeScreen();
 }
 
