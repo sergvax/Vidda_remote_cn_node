@@ -91,7 +91,6 @@ class TV:
     def focus(self, delay: float = 0.4) -> None:
         """Автофокус через встроенное меню проектора."""
         for key, pause in [
-            ("KEY_HOME", 0.9),
             ("KEY_SETTING", 1.4),
             ("KEY_RIGHT", 0.5),
             ("KEY_DOWN", delay),

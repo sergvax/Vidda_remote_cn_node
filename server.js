@@ -833,7 +833,6 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 async function autoFocus() {
   assertConnected();
   const steps = [
-    ['KEY_HOME', 900],
     ['KEY_SETTING', 1400],
     ['KEY_RIGHT', 500],
     ['KEY_DOWN', 350],

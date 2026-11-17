@@ -168,10 +168,12 @@ body {
 
 /* ---------- dpad ---------- */
 
-.dpad-wrap {
+.nav {
   display: grid;
-  place-items: center;
-  padding: 8px 0 2px;
+  grid-template-columns: minmax(0, 1fr) 92px;
+  align-items: stretch;
+  gap: 12px;
+  padding: 2px 0 0;
 }
 
 .dpad {
@@ -179,10 +181,11 @@ body {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
   grid-template-rows: repeat(3, 1fr);
-  gap: 6px;
-  width: min(74vw, 280px);
+  gap: 5px;
+  width: min(52vw, 196px);
   aspect-ratio: 1;
-  padding: 10px;
+  margin: 0 auto;
+  padding: 8px;
   border-radius: 50%;
   background:
     radial-gradient(circle at 50% 30%, rgba(124, 92, 255, 0.16), transparent 58%),
@@ -230,16 +233,35 @@ body {
   background: rgba(255, 255, 255, 0.055);
 }
 
-.dpad-key.up { grid-area: 1 / 2; border-radius: 22px 22px 14px 14px; }
-.dpad-key.left { grid-area: 2 / 1; border-radius: 22px 14px 14px 22px; }
-.dpad-key.right { grid-area: 2 / 3; border-radius: 14px 22px 22px 14px; }
-.dpad-key.down { grid-area: 3 / 2; border-radius: 14px 14px 22px 22px; }
+.dpad-key.up { grid-area: 1 / 2; border-radius: 18px 18px 11px 11px; }
+.dpad-key.left { grid-area: 2 / 1; border-radius: 18px 11px 11px 18px; }
+.dpad-key.right { grid-area: 2 / 3; border-radius: 11px 18px 18px 11px; }
+.dpad-key.down { grid-area: 3 / 2; border-radius: 11px 11px 18px 18px; }
 
-.dpad-key.ok {
+.dpad-hole {
   grid-area: 2 / 2;
+  display: grid;
+  place-items: center;
+}
+
+.dpad-hole::after {
+  content: "";
+  width: 9px;
+  height: 9px;
   border-radius: 50%;
+  background: rgba(255, 255, 255, 0.14);
+  box-shadow: 0 0 12px rgba(124, 92, 255, 0.35);
+}
+
+.ok-side {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  border-radius: 24px;
   background:
-    radial-gradient(circle at 50% 25%, rgba(255, 255, 255, 0.22), transparent 55%),
+    radial-gradient(circle at 50% 22%, rgba(255, 255, 255, 0.22), transparent 55%),
     linear-gradient(160deg, #8b6bff, #5a3ed6 60%, #3b22a8);
   border-color: rgba(180, 160, 255, 0.55);
   box-shadow: 0 10px 30px rgba(90, 62, 214, 0.45), inset 0 1px 0 rgba(255, 255, 255, 0.25);
@@ -248,8 +270,10 @@ body {
   letter-spacing: 0.12em;
 }
 
-.dpad-key.ok:active,
-.dpad-key.ok.pressed {
+.ok-side svg { width: 26px; height: 26px; }
+
+.ok-side:active,
+.ok-side.pressed {
   background: linear-gradient(160deg, #a58dff, #6f52ea 60%, #4a2fc0);
   box-shadow: 0 0 32px rgba(124, 92, 255, 0.6), inset 0 1px 0 rgba(255, 255, 255, 0.3);
 }
@@ -424,14 +448,6 @@ body {
   outline: 2px solid rgba(124, 92, 255, 0.7);
   outline-offset: 4px;
   border-radius: 999px;
-}
-
-.vol-value {
-  min-width: 30px;
-  text-align: right;
-  font-size: 12px;
-  font-variant-numeric: tabular-nums;
-  color: var(--muted);
 }
 
 /* ---------- footer ---------- */

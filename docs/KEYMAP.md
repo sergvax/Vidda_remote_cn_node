@@ -53,7 +53,7 @@ Payload — одно из значений ниже. Имена кнопок с�
 не было. Рабочая последовательность через меню:
 
 ```
-KEY_HOME → KEY_SETTING → KEY_RIGHT → KEY_DOWN ×4 → KEY_OK
+KEY_SETTING → KEY_RIGHT → KEY_DOWN ×4 → KEY_OK
 ```
 
 Она реализована в `POST /api/focus` и кнопке «Автофокус» в интерфейсе.

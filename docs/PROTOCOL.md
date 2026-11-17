@@ -169,7 +169,7 @@ KEY_CONTROL_CENTER
 Рабочий путь — встроенное меню:
 
 ```
-KEY_HOME → KEY_SETTING → KEY_RIGHT → KEY_DOWN ×4 → KEY_OK
+KEY_SETTING → KEY_RIGHT → KEY_DOWN ×4 → KEY_OK
 ```
 
 После `KEY_SETTING` фокус стоит на левой категории `Projector`. `KEY_RIGHT`

@@ -62,14 +62,26 @@
 
     <div class="banner" id="banner" hidden></div>
 
-    <section class="dpad-wrap">
+    <section class="nav">
       <div class="dpad">
         <button class="key dpad-key up" data-key="KEY_UP" data-repeat="1" aria-label="Вверх"><svg><use href="#i-up"/></svg></button>
         <button class="key dpad-key left" data-key="KEY_LEFT" data-repeat="1" aria-label="Влево"><svg><use href="#i-left"/></svg></button>
-        <button class="key dpad-key ok" data-key="KEY_OK" aria-label="ОК"><span>OK</span></button>
+        <span class="dpad-hole" aria-hidden="true"></span>
         <button class="key dpad-key right" data-key="KEY_RIGHT" data-repeat="1" aria-label="Вправо"><svg><use href="#i-right"/></svg></button>
         <button class="key dpad-key down" data-key="KEY_DOWN" data-repeat="1" aria-label="Вниз"><svg><use href="#i-down"/></svg></button>
       </div>
+      <button class="key ok-side" data-key="KEY_OK" aria-label="ОК">
+        <svg><use href="#i-ok"/></svg>
+        <span>OK</span>
+      </button>
+    </section>
+
+    <section class="favorites" id="favoritesSection" hidden>
+      <header class="fav-head">
+        <span>Избранное</span>
+        <button class="fav-edit" id="favEdit">Изменить</button>
+      </header>
+      <div class="fav-grid" id="favGrid"></div>
     </section>
 
     <section class="row three">
@@ -99,8 +111,7 @@
       </div>
       <div class="volume-slider">
         <svg class="vol-icon" aria-hidden="true"><use href="#i-volume"/></svg>
-        <input class="vol-range" id="volumeRange" type="range" min="0" max="100" step="1" value="50" aria-label="Установить громкость">
-        <output class="vol-value" id="volumeValue" for="volumeRange">50</output>
+        <input class="vol-range" id="volumeRange" type="range" min="0" max="12" step="1" value="6" aria-label="Установить громкость">
       </div>
     </section>
 
@@ -121,14 +132,6 @@
         <svg><use href="#i-input"/></svg>
         <span>Входы</span>
       </button>
-    </section>
-
-    <section class="favorites" id="favoritesSection" hidden>
-      <header class="fav-head">
-        <span>Избранное</span>
-        <button class="fav-edit" id="favEdit">Изменить</button>
-      </header>
-      <div class="fav-grid" id="favGrid"></div>
     </section>
 
     <footer class="foot">

@@ -27,7 +27,6 @@ const favGrid = document.getElementById('favGrid');
 const favEdit = document.getElementById('favEdit');
 
 const volumeRange = document.getElementById('volumeRange');
-const volumeValue = document.getElementById('volumeValue');
 
 const appsModal = document.getElementById('appsModal');
 const appsBtn = document.getElementById('appsBtn');
@@ -51,6 +50,7 @@ const screenHint = document.getElementById('screenHint');
 
 let toastTimer = null;
 let lastStatus = null;
+let lastBannerHidden = null;
 let screenUrl = null;
 let screenBusy = false;
 let connectPrompted = false;
@@ -64,9 +64,37 @@ let volumeDragging = false;
 let volumeEditedAt = 0;
 
 const VOLUME_STORAGE_KEY = 'vidda.volume';
+const VOLUME_MAX = 12;
 
 function buzz(ms = 8) {
   try { navigator.vibrate?.(ms); } catch { /* ignore */ }
+}
+
+let audioCtx = null;
+
+/** Короткий тихий клик для обратной связи на кнопках пульта. */
+function playClick() {
+  try {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!Ctx) return;
+    audioCtx = audioCtx || new Ctx();
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+    const now = audioCtx.currentTime;
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = 'triangle';
+    osc.frequency.setValueAtTime(720, now);
+    osc.frequency.exponentialRampToValueAtTime(380, now + 0.045);
+    gain.gain.setValueAtTime(0.0001, now);
+    gain.gain.exponentialRampToValueAtTime(0.04, now + 0.006);
+    gain.gain.exponentialRampToValueAtTime(0.0001, now + 0.06);
+    osc.connect(gain);
+    gain.connect(audioCtx.destination);
+    osc.start(now);
+    osc.stop(now + 0.07);
+  } catch {
+    /* звук не критичен */
+  }
 }
 
 function toast(message, type = '') {
@@ -87,8 +115,11 @@ async function api(path, options = {}) {
   return data;
 }
 
-async function sendKey(key) {
-  buzz();
+async function sendKey(key, silent = false) {
+  if (!silent) {
+    buzz();
+    playClick();
+  }
   try {
     await api('/api/key', { method: 'POST', body: JSON.stringify({ key }) });
   } catch (err) {
@@ -103,16 +134,18 @@ function initialVolume() {
   const raw = localStorage.getItem(VOLUME_STORAGE_KEY);
   if (raw !== null) {
     const stored = Number(raw);
-    if (Number.isFinite(stored)) return stored;
+    if (Number.isFinite(stored)) {
+      return Math.max(0, Math.min(VOLUME_MAX, Math.round(stored)));
+    }
   }
-  return 50;
+  return 6;
 }
 
 function setVolumeUI(value, persist = false) {
-  const v = Math.max(0, Math.min(100, Math.round(Number(value) || 0)));
+  const v = Math.max(0, Math.min(VOLUME_MAX, Math.round(Number(value) || 0)));
   volumeRange.value = String(v);
-  volumeRange.style.setProperty('--fill', `${v}%`);
-  volumeValue.textContent = String(v);
+  const percent = (v / VOLUME_MAX) * 100;
+  volumeRange.style.setProperty('--fill', `${percent}%`);
   if (persist) {
     try { localStorage.setItem(VOLUME_STORAGE_KEY, String(v)); } catch { /* ignore */ }
   }
@@ -138,13 +171,13 @@ async function applyVolume(value) {
   }
   const v = setVolumeUI(value, true);
   volumeBusy = true;
+  playClick();
   try {
     const info = await api('/api/volume', {
       method: 'POST',
       body: JSON.stringify({ value: v }),
     });
     if (lastStatus) lastStatus.volume = info.volume;
-    volText.textContent = `громкость ${info.volume}`;
   } catch (err) {
     toast(err.message, 'error');
   } finally {
@@ -189,7 +222,7 @@ function startRepeat(button) {
 
   const entry = { delay: null, interval: null };
   entry.delay = setTimeout(() => {
-    entry.interval = setInterval(() => sendKey(key), 130);
+    entry.interval = setInterval(() => sendKey(key, true), 130);
   }, 380);
 
   repeatTimers.set(button, entry);
@@ -311,14 +344,41 @@ function setStatus(info) {
 }
 
 function renderFooter(info) {
-  if (typeof info.volume === 'number') {
-    volText.textContent = info.muted ? 'без звука' : `громкость ${info.volume}`;
-  } else if (info.muted === true) {
-    volText.textContent = 'без звука';
-  } else {
-    volText.textContent = 'локальная сеть';
+  volText.textContent = info.muted === true ? 'без звука' : 'локальная сеть';
+}
+
+/* ---------- fit to screen ---------- */
+
+let fitQueued = false;
+
+/**
+ * Подгоняет пульт под высоту окна, чтобы не появлялась прокрутка.
+ * Используется zoom: он, в отличие от transform, меняет layout-размер.
+ */
+function fitRemote() {
+  const remote = document.getElementById('remote');
+  if (!remote) return;
+  remote.style.zoom = '';
+  const available = window.innerHeight - 28;
+  const height = remote.getBoundingClientRect().height;
+  if (!height) return;
+  if (height > available) {
+    const scale = Math.max(0.68, available / height);
+    remote.style.zoom = String(scale);
   }
 }
+
+function scheduleFit() {
+  if (fitQueued) return;
+  fitQueued = true;
+  requestAnimationFrame(() => {
+    fitQueued = false;
+    fitRemote();
+  });
+}
+
+window.addEventListener('resize', scheduleFit);
+window.visualViewport?.addEventListener('resize', scheduleFit);
 
 async function refreshStatus() {
   try {
@@ -335,6 +395,10 @@ async function refreshStatus() {
       banner.hidden = false;
     } else {
       banner.hidden = true;
+    }
+    if (banner.hidden !== lastBannerHidden) {
+      lastBannerHidden = banner.hidden;
+      scheduleFit();
     }
     if (!info.ip && !info.discovering && info.lastError && !connectPrompted) {
       connectPrompted = true;
@@ -449,6 +513,7 @@ powerConfirm.addEventListener('click', () => {
 wakeBtn.addEventListener('click', async () => {
   closeModals();
   buzz(20);
+  playClick();
   try {
     const info = await api('/api/wake', { method: 'POST' });
     toast(`Wake-on-LAN отправлен (${info.sent.length})`);
@@ -464,6 +529,7 @@ function sourceName(source) {
 }
 
 async function sendSource(source) {
+  playClick();
   try {
     await api('/api/source', {
       method: 'POST',
@@ -563,9 +629,12 @@ function renderFavorites(list, force = false) {
     button.addEventListener('click', () => launchApp(app));
     favGrid.append(button);
   }
+
+  scheduleFit();
 }
 
 async function toggleFavorite(app, button) {
+  playClick();
   const next = !isFavorite(app.package);
   try {
     const info = await api('/api/favorites', {
@@ -667,6 +736,7 @@ async function loadApps() {
 }
 
 async function launchApp(app) {
+  playClick();
   try {
     await api('/api/app', {
       method: 'POST',
@@ -700,6 +770,7 @@ async function runAutoFocus() {
   focusBusy = true;
   focusBtn.classList.add('pressed');
   buzz(14);
+  playClick();
   toast('Автофокус: открываю меню проектора…');
   try {
     await api('/api/focus', { method: 'POST' });
@@ -782,6 +853,12 @@ screenModal.addEventListener('click', (e) => {
 refreshStatus();
 setInterval(refreshStatus, 3000);
 
+window.addEventListener('load', scheduleFit);
+setTimeout(scheduleFit, 300);
+
 window.addEventListener('visibilitychange', () => {
-  if (document.visibilityState === 'visible') refreshStatus();
+  if (document.visibilityState === 'visible') {
+    refreshStatus();
+    scheduleFit();
+  }
 });

@@ -1,6 +1,6 @@
 {
   "name": "vidda-remote-cn-node",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "private": true,
   "description": "Локальный веб-пульт для китайского проектора Vidda (Hisense): MQTT, приложения и избранное, автофокус, громкость, входы, скриншоты, Wake-on-LAN",
   "license": "MIT",
