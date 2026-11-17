@@ -72,6 +72,14 @@ const ALLOWED_KEYS = new Set([
 
 const PLAY_CONTROL = new Set(['PLAY', 'PAUSE', 'FAST_FORWORD', 'FAST_BACKWORD']);
 
+const APP_PACKAGE_RE = /^[a-zA-Z0-9_]+(\.[a-zA-Z0-9_]+)+$/;
+
+/**
+ * Избранные приложения — общая локальная настройка. Хранится в config.json,
+ * поэтому список одинаков для всех устройств в сети.
+ */
+const MAX_FAVORITES = 12;
+
 const state = {
   ip: process.env.VIDDA_IP || null,
   clientId: process.env.VIDDA_CLIENT_ID || null,
@@ -91,6 +99,7 @@ const state = {
   screenshotOk: null,
   screenshotAt: null,
   apps: [],
+  favorites: [],
   lastSource: null,
 };
 
@@ -141,6 +150,11 @@ async function loadConfig() {
     if (cfg.name) state.name = cfg.name;
     if (cfg.model) state.model = cfg.model;
     if (Array.isArray(cfg.macs) && cfg.macs.length) state.macs = cfg.macs;
+    if (Array.isArray(cfg.favorites)) {
+      state.favorites = cfg.favorites
+        .filter((pkg) => typeof pkg === 'string' && APP_PACKAGE_RE.test(pkg))
+        .slice(0, MAX_FAVORITES);
+    }
     if (Array.isArray(cfg.sources) && cfg.sources.length) {
       const sources = cfg.sources
         .map((source) => {
@@ -170,6 +184,7 @@ async function saveConfig() {
     model: state.model,
     macs: state.macs,
     sources: state.sources,
+    favorites: state.favorites,
   };
   await fs.writeFile(CONFIG_FILE, JSON.stringify(cfg, null, 2)).catch(() => {});
 }
@@ -595,6 +610,12 @@ function connectMqtt() {
         { qos: 0 }
       );
     }
+    // Кэш приложений нужен, чтобы показывать названия избранного.
+    if (!state.apps.length) {
+      setTimeout(() => {
+        requestAppList().catch(() => {});
+      }, 600);
+    }
     console.log(`[mqtt] подключено к ${url}, clientId=${state.clientId}`);
   });
 
@@ -758,7 +779,7 @@ function changeSource(sourceId) {
 
 function startApp(packageName) {
   const pkg = String(packageName || '').trim();
-  if (!/^[a-zA-Z0-9_]+(\.[a-zA-Z0-9_]+)+$/.test(pkg)) {
+  if (!APP_PACKAGE_RE.test(pkg)) {
     throw Object.assign(new Error('Некорректное имя пакета'), { status: 400 });
   }
   assertConnected();
@@ -851,6 +872,44 @@ function requestAppList(timeoutMs = 5000) {
   });
 
   return appsInFlight;
+}
+
+function favoriteApps() {
+  return state.favorites.map((pkg) => {
+    const app = state.apps.find((item) => item.package === pkg);
+    return { package: pkg, name: app ? app.name : pkg };
+  });
+}
+
+/**
+ * Добавляет, убирает или переключает приложение в избранном.
+ * `favorite === undefined` — переключить.
+ */
+function setFavorite(packageName, favorite) {
+  const pkg = String(packageName || '').trim();
+  if (!APP_PACKAGE_RE.test(pkg)) {
+    throw Object.assign(new Error('Некорректное имя пакета'), { status: 400 });
+  }
+
+  const exists = state.favorites.includes(pkg);
+  const shouldAdd = favorite === undefined ? !exists : Boolean(favorite);
+
+  if (shouldAdd && !exists) {
+    if (state.favorites.length >= MAX_FAVORITES) {
+      throw Object.assign(
+        new Error(`В избранном уже ${MAX_FAVORITES} приложений — сначала убери лишнее`),
+        { status: 400 }
+      );
+    }
+    state.favorites = [...state.favorites, pkg];
+  } else if (!shouldAdd && exists) {
+    state.favorites = state.favorites.filter((item) => item !== pkg);
+  }
+
+  return {
+    favorite: state.favorites.includes(pkg),
+    favorites: favoriteApps(),
+  };
 }
 
 function requestScreenshot(timeoutMs = 6000) {
@@ -1050,6 +1109,8 @@ const server = http.createServer(async (req, res) => {
         lastState: state.lastState,
         lastSource: state.lastSource,
         appsCount: state.apps.length,
+        favorites: favoriteApps(),
+        maxFavorites: MAX_FAVORITES,
       });
     }
 
@@ -1092,6 +1153,22 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname === '/api/app' && req.method === 'POST') {
       const body = await readBody(req);
       const result = startApp(body.package);
+      return json(res, 200, { ok: true, ...result });
+    }
+
+    if (url.pathname === '/api/favorites' && req.method === 'GET') {
+      return json(res, 200, {
+        favorites: favoriteApps(),
+        maxFavorites: MAX_FAVORITES,
+      });
+    }
+
+    if (url.pathname === '/api/favorites' && req.method === 'POST') {
+      const body = await readBody(req);
+      const favorite =
+        typeof body.favorite === 'boolean' ? body.favorite : undefined;
+      const result = setFavorite(body.package, favorite);
+      await saveConfig();
       return json(res, 200, { ok: true, ...result });
     }
 

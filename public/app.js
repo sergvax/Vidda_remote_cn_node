@@ -22,6 +22,13 @@ const sourceList = document.getElementById('sourceList');
 
 const focusBtn = document.getElementById('focusBtn');
 
+const favoritesSection = document.getElementById('favoritesSection');
+const favGrid = document.getElementById('favGrid');
+const favEdit = document.getElementById('favEdit');
+
+const volumeRange = document.getElementById('volumeRange');
+const volumeValue = document.getElementById('volumeValue');
+
 const appsModal = document.getElementById('appsModal');
 const appsBtn = document.getElementById('appsBtn');
 const appsCancel = document.getElementById('appsCancel');
@@ -47,6 +54,16 @@ let lastStatus = null;
 let screenUrl = null;
 let screenBusy = false;
 let connectPrompted = false;
+
+let favorites = [];
+let favoritesSignature = '';
+let currentApps = [];
+let volumeBusy = false;
+let volumeTimer = null;
+let volumeDragging = false;
+let volumeEditedAt = 0;
+
+const VOLUME_STORAGE_KEY = 'vidda.volume';
 
 function buzz(ms = 8) {
   try { navigator.vibrate?.(ms); } catch { /* ignore */ }
@@ -79,6 +96,85 @@ async function sendKey(key) {
     setStatus({ mqttConnected: false });
   }
 }
+
+/* ---------- volume slider ---------- */
+
+function initialVolume() {
+  const raw = localStorage.getItem(VOLUME_STORAGE_KEY);
+  if (raw !== null) {
+    const stored = Number(raw);
+    if (Number.isFinite(stored)) return stored;
+  }
+  return 50;
+}
+
+function setVolumeUI(value, persist = false) {
+  const v = Math.max(0, Math.min(100, Math.round(Number(value) || 0)));
+  volumeRange.value = String(v);
+  volumeRange.style.setProperty('--fill', `${v}%`);
+  volumeValue.textContent = String(v);
+  if (persist) {
+    try { localStorage.setItem(VOLUME_STORAGE_KEY, String(v)); } catch { /* ignore */ }
+  }
+  return v;
+}
+
+function syncVolume(info) {
+  if (volumeDragging) return;
+  if (Date.now() - volumeEditedAt < 1500) return;
+  if (typeof info.volume === 'number') setVolumeUI(info.volume, true);
+}
+
+function scheduleVolume(value) {
+  clearTimeout(volumeTimer);
+  volumeTimer = setTimeout(() => applyVolume(value), 220);
+}
+
+async function applyVolume(value) {
+  clearTimeout(volumeTimer);
+  if (volumeBusy) {
+    scheduleVolume(value);
+    return;
+  }
+  const v = setVolumeUI(value, true);
+  volumeBusy = true;
+  try {
+    const info = await api('/api/volume', {
+      method: 'POST',
+      body: JSON.stringify({ value: v }),
+    });
+    if (lastStatus) lastStatus.volume = info.volume;
+    volText.textContent = `громкость ${info.volume}`;
+  } catch (err) {
+    toast(err.message, 'error');
+  } finally {
+    volumeBusy = false;
+  }
+}
+
+volumeRange.addEventListener('input', () => {
+  volumeEditedAt = Date.now();
+  setVolumeUI(volumeRange.value);
+  if (!volumeDragging) scheduleVolume(volumeRange.value);
+});
+volumeRange.addEventListener('pointerdown', () => { volumeDragging = true; });
+const endVolumeDrag = () => { volumeDragging = false; };
+volumeRange.addEventListener('pointerup', endVolumeDrag);
+volumeRange.addEventListener('pointercancel', endVolumeDrag);
+volumeRange.addEventListener('change', () => {
+  volumeDragging = false;
+  volumeEditedAt = Date.now();
+  applyVolume(volumeRange.value);
+});
+volumeRange.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    volumeEditedAt = Date.now();
+    applyVolume(volumeRange.value);
+  }
+});
+
+setVolumeUI(initialVolume());
 
 /* ---------- long press ---------- */
 
@@ -177,10 +273,15 @@ window.addEventListener('keydown', (e) => {
   }
   if (anyModalOpen()) return;
 
+  if (e.target instanceof HTMLElement && (e.target.tagName === 'INPUT' || e.target.isContentEditable)) {
+    return;
+  }
+
   if (e.key === 'i' || e.key === 'I') { openSources(); return; }
   if (e.key === 'a' || e.key === 'A') { openApps(); return; }
   if (e.key === 'c' || e.key === 'C') { openScreen(); return; }
   if (e.key === 'f' || e.key === 'F') { runAutoFocus(); return; }
+  if (e.key === 'v' || e.key === 'V') { volumeRange.focus(); return; }
 
   const key = KEYBOARD_MAP[e.key];
   if (!key) return;
@@ -227,6 +328,8 @@ async function refreshStatus() {
     if (info.name) deviceName.textContent = info.name;
     ipText.textContent = info.ip || 'IP не найден';
     renderFooter(info);
+    renderFavorites(info.favorites || []);
+    syncVolume(info);
     if (info.lastError) {
       banner.textContent = info.lastError;
       banner.hidden = false;
@@ -412,11 +515,87 @@ sourceModal.addEventListener('click', (e) => {
   if (e.target === sourceModal) closeModals();
 });
 
+/* ---------- favorites ---------- */
+
+function hashHue(text) {
+  let hash = 0;
+  for (let i = 0; i < text.length; i += 1) {
+    hash = (hash * 31 + text.charCodeAt(i)) >>> 0;
+  }
+  return hash % 360;
+}
+
+function avatarLetter(app) {
+  const source = String(app.name || app.package || '?').trim();
+  const char = [...source].find((c) => /[\p{L}\p{N}]/u.test(c));
+  return (char || '?').toUpperCase();
+}
+
+function isFavorite(packageName) {
+  return favorites.some((item) => item.package === packageName);
+}
+
+function renderFavorites(list, force = false) {
+  favorites = Array.isArray(list) ? list : favorites;
+  const signature = favorites.map((item) => `${item.package}|${item.name}`).join('~');
+  if (!force && signature === favoritesSignature) return;
+  favoritesSignature = signature;
+
+  favGrid.innerHTML = '';
+  favoritesSection.hidden = favorites.length === 0;
+
+  for (const app of favorites) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'fav-app';
+    button.title = app.name || app.package;
+
+    const avatar = document.createElement('span');
+    avatar.className = 'fav-avatar';
+    avatar.style.setProperty('--hue', String(hashHue(app.package)));
+    avatar.textContent = avatarLetter(app);
+
+    const label = document.createElement('span');
+    label.className = 'fav-label';
+    label.textContent = app.name || app.package;
+
+    button.append(avatar, label);
+    button.addEventListener('click', () => launchApp(app));
+    favGrid.append(button);
+  }
+}
+
+async function toggleFavorite(app, button) {
+  const next = !isFavorite(app.package);
+  try {
+    const info = await api('/api/favorites', {
+      method: 'POST',
+      body: JSON.stringify({ package: app.package, favorite: next }),
+    });
+    button.classList.toggle('on', Boolean(info.favorite));
+    const label = info.favorite ? 'Убрать из избранного' : 'В избранное';
+    button.setAttribute('aria-label', label);
+    button.title = label;
+    if (lastStatus) lastStatus.favorites = info.favorites;
+    renderFavorites(info.favorites || [], true);
+    toast(
+      info.favorite
+        ? `В избранном: ${app.name || app.package}`
+        : `Убрано из избранного: ${app.name || app.package}`
+    );
+  } catch (err) {
+    toast(err.message, 'error');
+  }
+}
+
+favEdit.addEventListener('click', openApps);
+
 /* ---------- apps ---------- */
 
 let appsBusy = false;
 
 function renderApps(apps) {
+  currentApps = apps;
   appsList.innerHTML = '';
   if (!apps.length) {
     const empty = document.createElement('p');
@@ -425,7 +604,11 @@ function renderApps(apps) {
     return;
   }
   for (const app of apps) {
+    const row = document.createElement('div');
+    row.className = 'app-row';
+
     const button = document.createElement('button');
+    button.type = 'button';
     button.className = 'source-item app-item';
     const meta = document.createElement('span');
     meta.className = 'app-meta';
@@ -440,7 +623,24 @@ function renderApps(apps) {
     icon.innerHTML = '<use href="#i-apps"/>';
     button.append(meta, icon);
     button.addEventListener('click', () => launchApp(app));
-    appsList.append(button);
+
+    const star = document.createElement('button');
+    star.type = 'button';
+    const on = isFavorite(app.package);
+    const starLabel = on ? 'Убрать из избранного' : 'В избранное';
+    star.className = `fav-toggle${on ? ' on' : ''}`;
+    star.setAttribute('aria-label', starLabel);
+    star.title = starLabel;
+    const starIcon = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    starIcon.innerHTML = '<use href="#i-star"/>';
+    star.append(starIcon);
+    star.addEventListener('click', (e) => {
+      e.stopPropagation();
+      toggleFavorite(app, star);
+    });
+
+    row.append(button, star);
+    appsList.append(row);
   }
 }
 

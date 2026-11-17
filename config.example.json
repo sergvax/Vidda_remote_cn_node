@@ -4,6 +4,7 @@
   "name": "",
   "model": "HiSmart",
   "macs": [],
+  "favorites": [],
   "sources": [
     { "id": "HDMI_1", "name": "HDMI 1" },
     { "id": "HDMI_2", "name": "HDMI 2" }
