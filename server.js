@@ -2,14 +2,21 @@
  * Локальный пульт для проектора Vidda / Hisense.
  *
  * Управление идёт по встроенному MQTT-брокеру проектора (порт 36669).
- * Топик команд: /remoteapp/tv/hiservice_cmd/<clientId>/actions/sendkey
- * clientId — это UDN устройства из DLNA-описания без "uuid:" и дефисов
- * (32 hex-символа).
+ * Топик команд: /remoteapp/tv/hiservice_cmd/<clientId>/actions/<action>
+ * clientId — произвольный идентификатор: проектор отвечает под тем, который
+ * указан в топике. UDN из DLNA больше не нужен.
  *
- * Дополнительно:
- *  - скриншот экрана:  .../actions/screenshot -> /remoteapp/mobile/<clientId>/hiservice/data/screenshot
- *  - смена входа:      /remoteapp/tv/ui_service/<clientId>/actions/changesource
- *  - включение:        Wake-on-LAN (обычный KEY_POWER только выключает)
+ * Подтверждённые действия:
+ *  - sendkey       payload: KEY_* (см. ALLOWED_KEYS)
+ *  - changesource  payload: HDMI_1, HDMI_2, ...
+ *  - startapp      payload: {"package":"..."}
+ *  - setvolume     payload: число
+ *  - setmute       payload: true / false
+ *  - playcontrol   payload: PLAY / PAUSE / FAST_FORWORD / FAST_BACKWORD
+ *  - screenshot    ответ: /remoteapp/mobile/<clientId>/hiservice/data/screenshot
+ *  - getapplist    ответ: .../hiservice/data/getapplist
+ *
+ * Включение: Wake-on-LAN (обычный KEY_POWER только выключает).
  */
 
 import http from 'node:http';
@@ -31,32 +38,39 @@ const MQTT_PORT = Number(process.env.VIDDA_PORT || 36669);
 const MQTT_USER = process.env.VIDDA_USER || 'hisenseservice';
 const MQTT_PASS = process.env.VIDDA_PASS || 'multimqttservice';
 
-/** Входы по умолчанию. sourceid — из протокола VIDAA. */
+/**
+ * Входы по умолчанию. Проектор принимает строковые идентификаторы
+ * HDMI_1…HDMI_4 / LIVETV / VGA (проверено: HDMI_1, HDMI_2).
+ * Список можно переопределить в config.json.
+ */
 const DEFAULT_SOURCES = [
-  { id: '3', name: 'HDMI 1' },
-  { id: '4', name: 'HDMI 2' },
-  { id: '0', name: 'ТВ' },
+  { id: 'HDMI_1', name: 'HDMI 1' },
+  { id: 'HDMI_2', name: 'HDMI 2' },
 ];
 
 /**
  * Разрешённые кнопки — защита от подстановки произвольного топика.
  *
- * Подтверждено на этом проекторе: базовая навигация, громкость, меню,
- * KEY_SETTING (открывает настройки проектора).
- * Экспериментально: KEY_AUTOFOCUS, KEY_FAVORITE.
+ * Имена сверены с таблицей клавиш Vidda (WeShare/assets/keycode.xml).
+ * На этом проекторе подтверждены: навигация, OK, RETURNS, HOME, MENU,
+ * VOLUMEUP/DOWN, MUTE, POWER, SETTING, цифры.
  */
 const ALLOWED_KEYS = new Set([
   'KEY_POWER',
   'KEY_UP', 'KEY_DOWN', 'KEY_LEFT', 'KEY_RIGHT',
-  'KEY_OK', 'KEY_OK_LONG_PRESS',
-  'KEY_MENU', 'KEY_RETURNS', 'KEY_EXIT', 'KEY_HOME',
-  'KEY_VOLUMEUP', 'KEY_VOLUMEDOWN', 'KEY_MUTE', 'KEY_MUTE_LONG_PRESS',
-  'KEY_SETTING', 'KEY_AUTOFOCUS', 'KEY_FAVORITE',
-  'KEY_JUBAO', 'KEY_APPS', 'KEY_LIVE',
-  'KEY_PLAY', 'KEY_PAUSE', 'KEY_STOP', 'KEY_FORWARDS', 'KEY_BACK',
-  'KEY_CHANNELUP', 'KEY_CHANNELDOWN', 'KEY_SUBTITLE',
+  'KEY_OK',
+  'KEY_RETURNS', 'KEY_BACKS',
+  'KEY_HOME', 'KEY_MENU',
+  'KEY_VOLUMEUP', 'KEY_VOLUMEDOWN', 'KEY_MUTE',
+  'KEY_SETTING',
+  'KEY_CHANNELUP', 'KEY_CHANNELDOWN',
+  'KEY_INFO', 'KEY_STAR',
+  'KEY_VOICECONTROL', 'KEY_RESTS',
+  'KEY_ALTERNATES', 'KEY_POUND',
   ...Array.from({ length: 10 }, (_, i) => `KEY_${i}`),
 ]);
+
+const PLAY_CONTROL = new Set(['PLAY', 'PAUSE', 'FAST_FORWORD', 'FAST_BACKWORD']);
 
 const state = {
   ip: process.env.VIDDA_IP || null,
@@ -76,12 +90,25 @@ const state = {
   muted: null,
   screenshotOk: null,
   screenshotAt: null,
+  apps: [],
+  lastSource: null,
 };
 
 let mqttClient = null;
 let pendingShot = null;
 let shotInFlight = null;
 let lastShot = null;
+let pendingApps = null;
+let appsInFlight = null;
+
+/**
+ * Старые sourceid из протокола VIDAA → строковые входы hiservice.
+ * Оставляем только входы, которые реально переключаются на проекторе.
+ */
+const LEGACY_SOURCE_IDS = {
+  '3': 'HDMI_1',
+  '4': 'HDMI_2',
+};
 
 // ---------------------------------------------------------------------------
 // Конфигурация
@@ -105,6 +132,7 @@ function ensureClientId() {
 }
 
 async function loadConfig() {
+  let migrated = false;
   try {
     const raw = await fs.readFile(CONFIG_FILE, 'utf8');
     const cfg = JSON.parse(raw);
@@ -113,11 +141,25 @@ async function loadConfig() {
     if (cfg.name) state.name = cfg.name;
     if (cfg.model) state.model = cfg.model;
     if (Array.isArray(cfg.macs) && cfg.macs.length) state.macs = cfg.macs;
-    if (Array.isArray(cfg.sources) && cfg.sources.length) state.sources = cfg.sources;
+    if (Array.isArray(cfg.sources) && cfg.sources.length) {
+      const sources = cfg.sources
+        .map((source) => {
+          const id = String(source.id ?? '');
+          if (/^\d+$/.test(id)) {
+            migrated = true;
+            const mapped = LEGACY_SOURCE_IDS[id];
+            return mapped ? { id: mapped, name: source.name || mapped } : null;
+          }
+          return source;
+        })
+        .filter((source) => source && source.id);
+      if (sources.length) state.sources = sources;
+    }
   } catch {
     // первый запуск — конфига ещё нет
   }
   ensureClientId();
+  if (migrated) await saveConfig();
 }
 
 async function saveConfig() {
@@ -506,8 +548,7 @@ async function discover() {
 function responseTopics() {
   const cid = state.clientId;
   return [
-    `/remoteapp/mobile/${cid}/hiservice/data/screenshot`,
-    `/remoteapp/mobile/${cid}/hiservice/data/sendcastinfo`,
+    `/remoteapp/mobile/${cid}/hiservice/data/#`,
     `/remoteapp/mobile/broadcast/ui_service/state`,
     `/remoteapp/mobile/broadcast/platform_service/actions/volumechange`,
     `/remoteapp/mobile/broadcast/ui_service/volume`,
@@ -607,6 +648,35 @@ function handleMessage(topic, payload) {
     return;
   }
 
+  if (topic.endsWith('/hiservice/data/getapplist')) {
+    let apps = [];
+    try {
+      const data = JSON.parse(text);
+      if (Array.isArray(data)) {
+        apps = data
+          .filter((item) => item && item.package)
+          .map((item) => ({
+            name: String(item.name || item.package),
+            package: String(item.package),
+          }))
+          .sort((a, b) => a.name.localeCompare(b.name, 'ru'));
+      }
+    } catch {
+      /* ignore */
+    }
+    state.apps = apps;
+    if (pendingApps) {
+      pendingApps.resolve(apps);
+      pendingApps = null;
+    }
+    return;
+  }
+
+  if (topic.endsWith('/hiservice/data/changesourceresult')) {
+    state.lastSource = text || null;
+    return;
+  }
+
   if (topic.endsWith('/broadcast/hiservice/data/appswitch')) {
     try {
       const data = JSON.parse(text);
@@ -668,15 +738,119 @@ function sendKey(key) {
   return topic;
 }
 
+function actionTopic(action) {
+  return `/remoteapp/tv/hiservice_cmd/${state.clientId}/actions/${action}`;
+}
+
 function changeSource(sourceId) {
   const source = state.sources.find((s) => String(s.id) === String(sourceId));
   if (!source) {
     throw Object.assign(new Error(`Неизвестный вход: ${sourceId}`), { status: 400 });
   }
   assertConnected();
-  const topic = `/remoteapp/tv/ui_service/${state.clientId}/actions/changesource`;
-  mqttClient.publish(topic, JSON.stringify({ sourceid: String(source.id) }), { qos: 0 });
+  const topic = actionTopic('changesource');
+  // На проверенной прошивке payload — строка HDMI_1…HDMI_4 / LIVETV / VGA,
+  // а не JSON {"sourceid":...}.
+  mqttClient.publish(topic, String(source.id), { qos: 0 });
+  state.lastSource = String(source.id);
   return { topic, source };
+}
+
+function startApp(packageName) {
+  const pkg = String(packageName || '').trim();
+  if (!/^[a-zA-Z0-9_]+(\.[a-zA-Z0-9_]+)+$/.test(pkg)) {
+    throw Object.assign(new Error('Некорректное имя пакета'), { status: 400 });
+  }
+  assertConnected();
+  const topic = actionTopic('startapp');
+  mqttClient.publish(topic, JSON.stringify({ package: pkg }), { qos: 0 });
+  state.currentApp = pkg;
+  return { topic, package: pkg };
+}
+
+function setVolume(value) {
+  const volume = Number(value);
+  if (!Number.isFinite(volume) || volume < 0 || volume > 100) {
+    throw Object.assign(new Error('Громкость должна быть числом 0…100'), { status: 400 });
+  }
+  assertConnected();
+  const topic = actionTopic('setvolume');
+  mqttClient.publish(topic, String(Math.round(volume)), { qos: 0 });
+  state.volume = Math.round(volume);
+  return { topic, volume: state.volume };
+}
+
+function setMute(muted) {
+  assertConnected();
+  const topic = actionTopic('setmute');
+  mqttClient.publish(topic, muted ? 'true' : 'false', { qos: 0 });
+  state.muted = Boolean(muted);
+  return { topic, muted: state.muted };
+}
+
+function playControl(command) {
+  const cmd = String(command || '').toUpperCase();
+  if (!PLAY_CONTROL.has(cmd)) {
+    throw Object.assign(
+      new Error(`Неизвестная команда воспроизведения: ${command}`),
+      { status: 400 }
+    );
+  }
+  assertConnected();
+  const topic = actionTopic('playcontrol');
+  mqttClient.publish(topic, cmd, { qos: 0 });
+  return { topic, command: cmd };
+}
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/**
+ * Автофокус на этой прошивке не имеет отдельного MQTT-действия.
+ * Рабочий путь — встроенное меню проектора:
+ * KEY_SETTING → RIGHT (войти в список) → DOWN×4 (Auto Focus) → OK.
+ */
+async function autoFocus() {
+  assertConnected();
+  const steps = [
+    ['KEY_HOME', 900],
+    ['KEY_SETTING', 1400],
+    ['KEY_RIGHT', 500],
+    ['KEY_DOWN', 350],
+    ['KEY_DOWN', 350],
+    ['KEY_DOWN', 350],
+    ['KEY_DOWN', 350],
+    ['KEY_OK', 0],
+  ];
+  for (const [key, delay] of steps) {
+    mqttClient.publish(actionTopic('sendkey'), key, { qos: 0 });
+    if (delay) await sleep(delay);
+  }
+  return { sequence: steps.map(([key]) => key) };
+}
+
+function requestAppList(timeoutMs = 5000) {
+  assertConnected();
+  if (appsInFlight) return appsInFlight;
+
+  appsInFlight = new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      pendingApps = null;
+      reject(Object.assign(new Error('Проектор не прислал список приложений'), { status: 504 }));
+    }, timeoutMs);
+
+    pendingApps = {
+      resolve: (apps) => {
+        clearTimeout(timer);
+        resolve(apps);
+      },
+    };
+
+    mqttClient.publish(actionTopic('getapplist'), '', { qos: 0 });
+  }).finally(() => {
+    appsInFlight = null;
+  });
+
+  return appsInFlight;
 }
 
 function requestScreenshot(timeoutMs = 6000) {
@@ -874,6 +1048,8 @@ const server = http.createServer(async (req, res) => {
         screenshotOk: state.screenshotOk,
         screenshotAt: state.screenshotAt,
         lastState: state.lastState,
+        lastSource: state.lastSource,
+        appsCount: state.apps.length,
       });
     }
 
@@ -898,6 +1074,47 @@ const server = http.createServer(async (req, res) => {
     if (url.pathname === '/api/source' && req.method === 'POST') {
       const body = await readBody(req);
       const result = changeSource(body.id ?? body.source);
+      return json(res, 200, { ok: true, ...result });
+    }
+
+    if (url.pathname === '/api/apps' && req.method === 'GET') {
+      try {
+        const apps = await requestAppList();
+        return json(res, 200, { apps });
+      } catch (err) {
+        if (state.apps.length) {
+          return json(res, 200, { apps: state.apps, cached: true });
+        }
+        return json(res, err.status || 503, { error: err.message });
+      }
+    }
+
+    if (url.pathname === '/api/app' && req.method === 'POST') {
+      const body = await readBody(req);
+      const result = startApp(body.package);
+      return json(res, 200, { ok: true, ...result });
+    }
+
+    if (url.pathname === '/api/volume' && req.method === 'POST') {
+      const body = await readBody(req);
+      const result = setVolume(body.value ?? body.volume);
+      return json(res, 200, { ok: true, ...result });
+    }
+
+    if (url.pathname === '/api/mute' && req.method === 'POST') {
+      const body = await readBody(req);
+      const result = setMute(Boolean(body.muted ?? body.value));
+      return json(res, 200, { ok: true, ...result });
+    }
+
+    if (url.pathname === '/api/play' && req.method === 'POST') {
+      const body = await readBody(req);
+      const result = playControl(body.command ?? body.action);
+      return json(res, 200, { ok: true, ...result });
+    }
+
+    if (url.pathname === '/api/focus' && req.method === 'POST') {
+      const result = await autoFocus();
       return json(res, 200, { ok: true, ...result });
     }
 

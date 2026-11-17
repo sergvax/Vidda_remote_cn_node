@@ -4,9 +4,9 @@
 Прошивка отвечает на MQTT, но не на стандартный VIDAA-пульт из некоторых
 интеграций.
 
-Сетевые идентификаторы (IP, UDN, clientId, MAC, серийный номер, device ID) в
-репозитории не публикуются. Они определяются автоматически через SSDP и
-хранятся только в локальном `config.json`.
+Сетевые идентификаторы (IP, MAC, UDN, серийный номер, device ID) в репозитории
+не публикуются. IP, MAC и `clientId` определяются автоматически и хранятся
+только в локальном `config.json`.
 
 ## Устройство
 
@@ -17,21 +17,45 @@
 | MQTT-порт | `36669` |
 | transport_protocol | `1` |
 
-`clientId` — это UDN без `uuid:` и дефисов. Он стабилен и берётся из
-DLNA-описания, которое отдаётся по SSDP.
+`clientId` — произвольная строка. Проектор не сверяет её с UDN: он отвечает и
+публикует данные под тем идентификатором, который указан в топике. Поэтому пульт
+генерирует собственный `clientId` вида `vidda_remote_<12 hex>` и сохраняет его в
+`config.json`. UDN из DLNA больше не нужен.
 
 ## Порты
 
 | Порт | Что отвечает |
 |---|---|
 | `36669` | MQTT-брокер (рабочий канал управления) |
+| `36671` | UDP-оповещение о устройстве (используется при автопоиске) |
 | `38400` | DLNA (рендерер, громкость не отражает) |
 | `7002`, `7100` | HTTP-подобный сервис, на любой запрос `501 Not Implemented` |
 | `9779` | «домашнее облако», снаружи не отвечает |
 | `54321` | ADB: TCP открыт, но handshake не отвечает |
-| `7778`, `7779` | закрыты (статья про HiSmart на этом устройстве не работает) |
+| `7778`, `7779` | закрыты |
 
-## MQTT
+## Автопоиск
+
+Пульт находит проектор тремя способами, по порядку:
+
+1. **UDP-broadcast на порт `36671`** — устройство отвечает пакетом со своими
+   данными.
+2. **SSDP** (`M-SEARCH` на `239.255.255.250:1900`) — на проверенном экземпляре
+   SSDP закрыт, ветка оставлена как резервная.
+3. **Сканирование локальной сети** — TCP-подключение к порту `36669` по всем
+   адресам своей `/24`.
+
+Найденный кандидат проверяется командой `getcastinfo`: проектор присылает
+`sendcastinfo` с моделью, именем и MAC (`btAddress`). MAC сразу сохраняется для
+Wake-on-LAN. Если автопоиск ничего не нашёл, IP можно ввести вручную — в окне
+подключения или через переменную `VIDDA_IP`.
+
+## Брокер
+
+MQTT-брокер — это **`com.hisense.hiservice`** (`MosquittoBrokerService`), который
+поднимает встроенный Mosquitto. Диспетчер команд — `HiServiceCmdMqttClient`
+(слушает `/remoteapp/tv/hiservice_cmd/#`), обработчик — `DataTransportNative`
+через `HiserviceCmdCallback`.
 
 Подключение — обычный MQTT 5 по TCP, без TLS:
 
@@ -45,15 +69,20 @@ protocol: MQTT 5
 
 Креды статические, взяты из нативного `libmqttcrypt.so` официального APK.
 
-### Команды
+## Топики
 
-Рабочий топик:
+Схема топиков:
 
 ```
-/remoteapp/tv/hiservice_cmd/<clientId>/actions/sendkey
+/remoteapp/<direction>/<target>/<source>/<method>/<command>
 ```
 
-Payload — имя кнопки, например `KEY_VOLUMEUP`.
+| Назначение | Топик |
+|---|---|
+| Команды | `/remoteapp/tv/hiservice_cmd/<clientId>/actions/<action>` |
+| Ответы на запросы | `/remoteapp/mobile/<clientId>/hiservice/data/<name>` |
+| Broadcast-состояния | `/remoteapp/mobile/broadcast/hiservice/data/<name>` |
+| Состояние UI | `/remoteapp/mobile/broadcast/ui_service/state` |
 
 Стандартный VIDAA-топик:
 
@@ -62,31 +91,46 @@ Payload — имя кнопки, например `KEY_VOLUMEUP`.
 ```
 
 на этом проекторе **игнорируется**. Именно поэтому интеграции, которые шлют
-только в `remote_service`, «не видят» кнопки.
-
-### Ответы и broadcast
+только в `remote_service`, «не видят» кнопки. Рабочий префикс — `hiservice_cmd`.
 
 Брокер отдаёт подписчику его же публикации в `/remoteapp/tv/...` (эхо), поэтому
 при sniff-е нужно фильтровать собственные сообщения.
 
-Наблюдаемые ответы и состояния:
+## Действия
 
-| Топик | Содержимое |
-|---|---|
-| `/remoteapp/mobile/<clientId>/hiservice/data/screenshot` | бинарный JPEG |
-| `/remoteapp/mobile/broadcast/hiservice/data/appswitch` | `{"from":"...","to":"..."}` |
-| `/remoteapp/mobile/broadcast/ui_service/state` | состояние (`statetype`, `sourceid`, ...) |
-| `/remoteapp/mobile/broadcast/platform_service/actions/volumechange` | громкость (на этом проекте не наблюдалась) |
-| `/remoteapp/mobile/broadcast/ui_service/volume` | громкость (на этом проекте не наблюдалась) |
-| `/remoteapp/mobile/broadcast/hiservice/data/strState` | служебные строки, например `panel str on` |
-| `/remoteapp/mobile/broadcast/hiservice/data/multiconfig` | конфиг устройства (виден при подключении официального приложения) |
+Полный список действий, найденных в `com.hisense.hiservice`:
 
-`appswitch` приходит retained. Значение `to: com.meetingroom` означает
-домашний экран/лаунчер.
+| Действие | Payload | Статус |
+|---|---|---|
+| `sendkey` | `KEY_*` | ✅ подтверждено |
+| `screenshot` | пусто | ✅ подтверждено |
+| `getcastinfo` | пусто | ✅ подтверждено |
+| `changesource` | `HDMI_1`…`HDMI_4`, `LIVETV`, `VGA` | ✅ HDMI_1/HDMI_2 |
+| `getapplist` | пусто | ✅ подтверждено |
+| `startapp` | `{"package":"..."}` | ✅ подтверждено |
+| `setvolume` | целое число | ✅ подтверждено |
+| `setmute` | `true` / `false` | ✅ подтверждено |
+| `playcontrol` | `PLAY` / `PAUSE` / `FAST_FORWORD` / `FAST_BACKWORD` | найдено в коде |
+| `startpage` | `KARAOKE` / `MOVIE` | найдено в коде |
+| `deviceconnect` | `SEND_DEVICE_CONNECT$<имя>` | служебное |
+| `changetvname` | новое имя | служебное |
+| `voice` | аудиопоток | служебное |
+| `initbluetooth` | — | служебное |
+| `bluetoothconnectstate` | — | служебное |
+| `lastwill` | — | служебное |
+| `tvscreenstate` | — | служебное |
+| `changeaudiooutput` | — | служебное |
+| `setlaserscreenstate` | `true` / `false` | найдено в коде |
+| `changelasertvinstallation` | — | найдено в коде |
+| `changeimagemode` | — | найдено в коде |
 
-## Кнопки
+Проверены на реальном проекторе только строки со статусом «подтверждено».
+Остальные найдены статическим разбором APK и могут отличаться на прошивке.
 
-Подтверждены на реальном проекторе:
+## Кнопки (sendkey)
+
+Payload — имя кнопки. Имена сверены с таблицей клавиш официального приложения
+`WeShare` → `assets/keycode.xml`.
 
 ```
 KEY_POWER
@@ -94,12 +138,16 @@ KEY_UP KEY_DOWN KEY_LEFT KEY_RIGHT KEY_OK
 KEY_RETURNS KEY_HOME KEY_MENU
 KEY_VOLUMEUP KEY_VOLUMEDOWN KEY_MUTE
 KEY_SETTING
+KEY_CHANNELUP KEY_CHANNELDOWN
+KEY_INFO KEY_STAR
+KEY_VOICECONTROL KEY_RESTS
+KEY_ALTERNATES KEY_POUND
+KEY_0 … KEY_9
 ```
 
-`KEY_SETTING` открывает встроенное меню проектора — подтверждено скриншотом
-`docs/screenshots/projector-settings.jpg`. В меню есть пункты `Auto Keystone`,
-`Manual Keystone`, `Size and Position`, `Auto Screen Alignment`, `Auto Focus`,
-`Manual Focus`, `Keystone Save`.
+`KEY_SETTING` открывает встроенное меню проектора — подтверждено скриншотом.
+В меню есть пункты `Auto Keystone`, `Manual Keystone`, `Size and Position`,
+`Auto Screen Alignment`, `Auto Focus`, `Manual Focus`, `Keystone Save`.
 
 Не поддерживаются (проверено нажатием и скриншотами):
 
@@ -109,54 +157,99 @@ KEY_MULTITASK
 KEY_CONTROL_CENTER
 ```
 
-Экспериментальные (код отправляется, но видимая реакция не подтверждена):
+Отдельного `KEY_AUTOFOCUS` на этой прошивке нет: код отправляется, но реакции
+не было. Рабочий автофокус — через меню (см. ниже).
+
+## Автофокус
+
+Прямого MQTT-действия «автофокус» не найдено. `com.hisense.screen` содержит
+`ElectricFocusingActivity` и broadcast `com.hisense.CalibrationFocus_ACTION`, но
+`startapp` запускает только launcher-пакет и не принимает имя activity.
+
+Рабочий путь — встроенное меню:
 
 ```
-KEY_AUTOFOCUS
-KEY_FAVORITE
+KEY_HOME → KEY_SETTING → KEY_RIGHT → KEY_DOWN ×4 → KEY_OK
 ```
 
-`KEY_AUTOFOCUS` и `KEY_FAVORITE` взяты как наиболее вероятные имена. Проверка
-по скриншотам на домашнем экране: `KEY_AUTO_FOCUS`, `KEY_AUTOFOCUS`, `KEY_FOCUS`,
-`KEY_FOCUS_AUTO`, `KEY_AF`, `KEY_FAV`, `KEY_FAVOURITE`, `KEY_FAVORITES`,
-`KEY_ADD_FAVORITE`, `KEY_HEART` — все дали 0.02% отличий (только часы), то есть
-видимой реакции не было. Наиболее вероятно, что эти кнопки на физическом пульте
-обрабатываются не через MQTT `sendkey`, либо коды отличаются на этой прошивке.
+После `KEY_SETTING` фокус стоит на левой категории `Projector`. `KEY_RIGHT`
+входит в список, четыре `KEY_DOWN` доводят до пункта `Auto Focus`, `KEY_OK`
+запускает фокус и закрывает меню. Именно эту последовательность выполняет
+`POST /api/focus`.
 
 ## Входы
 
-В протоколе VIDAA есть отдельный сервис:
+Рабочее действие:
 
 ```
-/remoteapp/tv/ui_service/<clientId>/actions/sourcelist
-/remoteapp/tv/ui_service/<clientId>/actions/changesource
+/remoteapp/tv/hiservice_cmd/<clientId>/actions/changesource
+payload: HDMI_1
 ```
 
-`changesource` принимает JSON:
+Payload — **строка**, а не JSON. Допустимые значения из кода:
+`HDMI_1`, `HDMI_2`, `HDMI_3`, `HDMI_4`, `LIVETV`, `VGA`.
+
+| Значение | Результат на проверенной прошивке |
+|---|---|
+| `HDMI_1` | ✅ вход переключился (смена кадра 76.99%) |
+| `HDMI_2` | ✅ вход переключился (смена кадра 76.93%) |
+| `LIVETV` | ❌ реакции нет (0.02%) |
+
+После переключения проектор присылает
+`/remoteapp/mobile/<clientId>/hiservice/data/changesourceresult`.
+
+Старый VIDAA-сервис `ui_service/changesource` с JSON `{"sourceid":"3"}`
+на этой прошивке не работает — вход не меняется.
+
+## Приложения
+
+Запрос списка:
+
+```
+/remoteapp/tv/hiservice_cmd/<clientId>/actions/getapplist
+payload: ""
+```
+
+Ответ приходит JSON-массивом в:
+
+```
+/remoteapp/mobile/<clientId>/hiservice/data/getapplist
+```
+
+Элемент списка содержит как минимум `name` и `package`. На проверенном
+проекторе вернулось 34 приложения.
+
+Запуск:
+
+```
+/remoteapp/tv/hiservice_cmd/<clientId>/actions/startapp
+payload: {"package":"com.android.tv.settings"}
+```
+
+`startapp` принимает **только имя пакета**. Строки с activity
+(`com.pkg/.Activity`, `com.pkg/com.pkg.Activity`) игнорируются. При успешном
+переключении приходит broadcast
+`/remoteapp/mobile/broadcast/hiservice/data/appswitch`:
 
 ```json
-{"sourceid": "3"}
+{"from":"com.meetingroom","to":"com.android.tv.settings"}
 ```
 
-Идентификаторы из `pyvidaa`:
+Значение `com.meetingroom` — домашний экран/лаунчер.
 
-| sourceid | Вход |
-|---|---|
-| `0` | TV |
-| `1` | AV |
-| `2` | Component |
-| `3` | HDMI 1 |
-| `4` | HDMI 2 |
-| `5` | HDMI 3 |
-| `6` | HDMI 4 |
+## Громкость и звук
 
-На этом проекторе `sourcelist` ответа не дал. `changesource` с `sourceid` `4`,
-а затем `3` тоже не изменил вход: скриншоты до и после совпали (разница 0.02% —
-только часы). Похоже, сервис не реализован на этой прошивке.
+Проверенные действия:
 
-Рабочий обходной путь: домашний экран показывает боковую панель
-`HDMI 1 / HDMI 2`, откуда входы переключаются вручную. В пульте для этого есть
-кнопка «Домой» в окне «Входы».
+```
+setvolume  payload: 10        → громкость 10
+setmute    payload: true      → без звука
+setmute    payload: false     → звук обратно
+```
+
+Broadcast-топики громкости (`platform_service/actions/volumechange`,
+`ui_service/volume`) на этом проекте не наблюдались, поэтому пульт не показывает
+фактическую громкость — только отправляет команду.
 
 ## Скриншот экрана
 
@@ -174,97 +267,53 @@ payload: ""
 payload: JPEG (FF D8 ...)
 ```
 
-Скриншот работает и отдаёт полноценный кадр 1920×1080, включая OSD/субтитры.
-Если сервис занят или превышен лимит, в ответ приходит **пустой payload**.
+Скриншот отдаёт полноценный кадр 1920×1080, включая OSD/субтитры. Если сервис
+занят или превышен лимит, приходит **пустой payload**.
 
-Важно: у сервиса есть ограничение частоты. После серии быстрых снимков
-(примерно 8–10 запросов подряд) проектор начинает возвращать пустые ответы на
-несколько минут, затем восстанавливается. Поэтому в пульте нет автообновления:
-снимок делается при открытии окна и по кнопке «Обновить».
+У сервиса есть ограничение частоты: после серии быстрых снимков (примерно 8–10
+запросов подряд) проектор несколько минут возвращает пустые ответы, затем
+восстанавливается. Поэтому в пульте нет автообновления: снимок делается при
+открытии окна и по кнопке «Обновить».
 
 ## Питание и Wake-on-LAN
 
 `KEY_POWER` только выключает/переводит в сон. Когда проектор выключен, MQTT
 недоступен, поэтому включить его командой нельзя.
 
-В `multiconfig` официального приложения видно:
-
-```
-network_wakeup=0
-```
-
-То есть сетевое ожидание на этом экземпляре, возможно, выключено. Пульт всё
-равно отправляет magic packet на MAC из `config.json` (широковещательно, порты
-9 и 7). Если WoL на проекторе разрешён — включение сработает.
-
-## Официальное Android-приложение
-
-Приложение подключается к локальному MQTT с clientId вида
-`<uuid>:00` и отправляет в `hiservice_cmd` служебные действия:
-
-```
-getcastinfo
-deviceconnect      payload: SEND_DEVICE_CONNECT$<имя-устройства>
-getconfig          payload: ["file_transfer"]
-screenshot
-```
-
-Ответы приходят в `/remoteapp/mobile/<app-clientId>/hiservice/data/...`:
-`sendcastinfo`, `fakeStandby`, `multiconfig`, `screenshot`.
-
-Важно: нажатия кнопок «Настройки», «Автофокус» и «Переключение входов» в
-приложении **не появились** в локальном MQTT. Судя по всему, приложение с
-аккаунтом отправляет их через облако. Поэтому точные коды этих кнопок не
-удалось перехватить; `KEY_SETTING` найден перебором.
-
-`multiconfig` также содержит:
-
-```
-tvDeviceId:<device-id>#DLNA_LIST@
-mqttport=36669
-transport_protocol=1
-remote_type=012
-input=0
-voice=1
-wire=1
-cap=1
-setname=1
-numerickey=1
-wechattv=1
-jubaokey=1
-network_wakeup=0
-```
-
-## Громкость и обратная связь
-
-- DLNA `GetVolume` всегда возвращает `50` и не связан с системной громкостью.
-- Broadcast-топики громкости при нажатиях `KEY_VOLUMEUP/DOWN` не появлялись.
-- `getvolume` в `platform_service` и `hiservice_cmd` ответа не дал.
-- `ui_service` `capability`/`applist`/`sourcelist` на этом проекторе молчат.
-- Единственный надёжный индикатор — сам экран. Скриншот после нажатия громкости
-  теоретически может поймать OSD, но это не потоковая обратная связь.
+Пульт отправляет **Wake-on-LAN** magic packet на MAC, полученный из
+`sendcastinfo` (`btAddress`), широковещательно на порты 9 и 7. Проверено: после
+magic packet проектор отвечает на ping и открывает порт `36669`.
 
 ## Что пробовалось и не сработало
 
 - `remote_service/sendkey` — игнорируется.
-- Порты `7778/7779` — закрыты.
+- Порты `7778/7779` — закрыты, SSDP на `1900` закрыт.
 - ADB на `54321` — TCP открыт, handshake не отвечает.
-- `gettvstate`, `getvolume`, `capability`, `sourcelist`, `applist` — ответов нет.
+- `gettvstate`, `getvolume`, `capability`, `sourcelist` — ответов нет.
 - Перебор `KEY_SETTINGS`, `KEY_SUBMENU`, `KEY_OPTIONS`, `KEY_PREFERENCES`,
   `KEY_CONFIG`, `KEY_SYSTEM_SETTINGS` — без эффекта. Работает именно
   `KEY_SETTING` (единственное число).
 - `KEY_AUTO_FOCUS`, `KEY_FOCUS`, `KEY_AF`, `KEY_FOCUS_AUTO` — без видимого
   эффекта (проверка скриншотами).
 - `KEY_SOURCE`, `KEY_INPUT`, `KEY_INPUTSOURCE`, `KEY_SOURCE_LIST`,
-  `KEY_INPUT_LIST`, `KEY_TVINPUT`, `KEY_HDMI`, `KEY_SIGNAL` — без видимого
-  эффекта.
-- `changesource` с `sourceid` `3`/`4` — вход не переключился.
+  `KEY_INPUT_LIST`, `KEY_TVINPUT`, `KEY_HDMI`, `KEY_SIGNAL` — без эффекта.
+- `ui_service/changesource` с `{"sourceid":"3"}` — вход не переключился.
+- `LIVETV` через `hiservice_cmd/changesource` — реакции нет.
+- «Избранное» через MQTT не найдено; вместо этого в пульте список приложений.
+
+## Ограничения разбора
+
+- Полный `hiservice_keycode.xml` недоступен: APK `JuThirdJump` обрезан, а
+  системный файл на проекторе без root/ADB не достать. Таблица клавиш собрана по
+  `WeShare/assets/keycode.xml` и проверена нажатиями.
+- `startapp` не принимает activity-имена, поэтому экраны вроде
+  `ElectricFocusingActivity` напрямую не запускаются.
+- DLNA `GetVolume` всегда возвращает `50` и не связан с системной громкостью.
 
 ## Следующие шаги
 
-1. Проверить `changesource` на другой прошивке/модели; на этой сервис молчит.
-2. Найти способ перехватить облачные запросы приложения (прокси) — там точные
-   имена действий для настроек, фокуса и входов.
-3. Проверить Wake-on-LAN после включения `Network Standby` в настройках.
-4. Если найдётся код автофокуса/избранного — заменить `data-key` в
-   `public/index.html` и добавить код в `ALLOWED_KEYS`.
+1. Проверить `changesource` для `HDMI_3`/`HDMI_4`/`VGA` на подходящем железе.
+2. Проверить `playcontrol` и `startpage` на экране с видео.
+3. Найти способ перехватить облачные запросы официального приложения — там
+   могут быть точные действия для фокуса и избранного.
+4. Проверить Wake-on-LAN после включения `Network Standby` в настройках.

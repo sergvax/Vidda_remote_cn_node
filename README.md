@@ -17,14 +17,14 @@
 - Громкость ±, mute, автоповтор при удержании.
 - Кнопка скриншотов.
 - **Настройки проектора** — открывает встроенное меню (`KEY_SETTING`).
-- **Автофокус** — экспериментальная кнопка (`KEY_AUTOFOCUS`).
-- **Избранное** — экспериментальная кнопка (`KEY_FAVORITE`).
-- **Входы** — переключение HDMI 1 / HDMI 2 / ТВ через `changesource` (на этом
-  экземпляре не сработало; в окне есть переход на домашний экран).
+- **Автофокус** — рабочая последовательность через меню проектора.
+- **Приложения** — список с проектора (`getapplist`), запуск через `startapp`.
+- **Входы** — переключение HDMI 1 / HDMI 2 командой `changesource`.
 - **Экран проектора** — снимок экрана по MQTT по кнопке «Обновить».
 - **Питание** — выключение командой и включение по Wake-on-LAN.
-- Автообнаружение проектора по SSDP; IP и client ID сохраняются в `config.json`.
-- Статус подключения, состояние интерфейса и громкость (если прошивка её отдаёт).
+- Автопоиск проектора по UDP-broadcast, SSDP и сканированию порта `36669`;
+  IP, MAC и `clientId` сохраняются в `config.json`.
+- Статус подключения, состояние интерфейса и список приложений.
 - PWA: можно добавить на домашний экран телефона.
 
 ## Скриншоты
@@ -66,12 +66,17 @@ IP компьютера:
 ipconfig getifaddr en0
 ```
 
-При первом запуске пульт сам ищет проектор по SSDP. Если не нашёл — нажми
-кнопку-статус в правом верхнем углу. IP и client ID можно задать вручную:
+При первом запуске пульт сам ищет проектор: UDP-broadcast на `36671`, SSDP и
+сканирование локальной сети по порту `36669`. Если не нашёл — нажми
+кнопку-статус в правом верхнем углу и введи IP вручную. IP и `clientId` можно
+задать и переменными окружения:
 
 ```bash
-VIDDA_IP=<IP-проектора> VIDDA_CLIENT_ID=<32-hex-client-id> npm start
+VIDDA_IP=<IP-проектора> VIDDA_CLIENT_ID=<любая-строка> npm start
 ```
+
+`clientId` — произвольный идентификатор. Проектор не сверяет его с UDN и
+отвечает под тем, который указан в топике.
 
 ## Кнопки
 
@@ -82,27 +87,38 @@ VIDDA_IP=<IP-проектора> VIDDA_CLIENT_ID=<32-hex-client-id> npm start
 | Назад / Домой / Меню | `KEY_RETURNS`, `KEY_HOME`, `KEY_MENU` | ✅ |
 | Громкость ± / Mute | `KEY_VOLUMEUP`, `KEY_VOLUMEDOWN`, `KEY_MUTE` | ✅ |
 | Настройки | `KEY_SETTING` | ✅ открывает меню проектора |
-| Автофокус | `KEY_AUTOFOCUS` | ⚠️ экспериментально |
-| Избранное | `KEY_FAVORITE` | ⚠️ экспериментально |
-| Входы | `changesource` + `sourceid` | ❌ на этом проекторе не переключил |
+| Автофокус | последовательность через меню | ✅ работает |
+| Приложения | `getapplist` + `startapp` | ✅ запускает приложения |
+| Входы | `changesource` + `HDMI_1`/`HDMI_2` | ✅ переключает HDMI 1 и 2 |
 | Яркость ± | `KEY_BRIGHTUP/DOWN` | ❌ не поддерживается |
 | Задачи, Центр | `KEY_MULTITASK`, `KEY_CONTROL_CENTER` | ❌ не поддерживается |
 
 Подробный разбор кодов и топиков — в [docs/KEYMAP.md](docs/KEYMAP.md) и
 [docs/PROTOCOL.md](docs/PROTOCOL.md).
 
-### Если автофокус не срабатывает
+### Автофокус
 
-В меню проектора есть пункт **Auto Focus**. Он открывается кнопкой
-«Настройки» → `Auto Focus`. На этой прошивке прямой код `KEY_AUTOFOCUS`
-подтвердить не удалось, поэтому кнопка помечена как экспериментальная.
+Отдельного MQTT-действия «автофокус» на этой прошивке нет. Пульт открывает
+встроенное меню проектора и доходит до пункта `Auto Focus`:
 
-### Если «Входы» не переключают
+```
+KEY_HOME → KEY_SETTING → KEY_RIGHT → KEY_DOWN ×4 → KEY_OK
+```
 
-На проверенном проекторе `changesource` с `sourceid` `3`/`4` не изменил вход
-(скриншоты до и после совпали). В окне «Входы» есть кнопка **«Домой»**: она
-открывает домашний экран, где входы переключаются в боковой панели
-`HDMI 1 / HDMI 2`.
+Это выполняет кнопка «Автофокус» (клавиша `F`) и `POST /api/focus`.
+
+### Приложения
+
+Кнопка «Приложения» (клавиша `A`) запрашивает `getapplist` и показывает список
+установленных приложений. Нажатие на элемент отправляет `startapp` с именем
+пакета. `startapp` принимает только пакет, activity-имена игнорируются.
+
+### Входы
+
+`changesource` принимает строку: `HDMI_1`, `HDMI_2`, `HDMI_3`, `HDMI_4`,
+`LIVETV`, `VGA`. На проверенном проекторе работают только **`HDMI_1`** и
+**`HDMI_2`**; `LIVETV` реакции не дал и в списке входов по умолчанию его нет.
+Список входов задаётся в `config.json`.
 
 ## Экран проектора
 
@@ -127,26 +143,32 @@ VIDDA_IP=<IP-проектора> VIDDA_CLIENT_ID=<32-hex-client-id> npm start
 
 MQTT-брокер доступен только когда проектор включён, поэтому `KEY_POWER` умеет
 только выключать. Для включения пульт отправляет **Wake-on-LAN** magic packet на
-MAC-адреса из `config.json`:
+MAC, полученный из `sendcastinfo` (`btAddress`), и сохранённый в `config.json`:
 
 ```json
-"macs": ["<MAC Ethernet>", "<MAC Wi-Fi>"]
+"macs": ["<MAC>"]
 ```
 
 MAC-адреса не захардкожены: если `macs` пустой, кнопка «Включить» вернёт
 понятную ошибку и попросит заполнить `config.json`.
 
 На проекторе должно быть разрешено сетевое ожидание (Network Standby / Wake on
-LAN). В служебной конфигурации этого экземпляра был флаг `network_wakeup=0`,
-поэтому включение по WoL не подтверждено — проверяй кнопкой «Включить».
+LAN). На проверенном экземпляре после magic packet проектор стал отвечать на
+ping и открыл порт `36669`.
 
 ## API
 
 ```
-GET  /api/status               состояние, источники, громкость
+GET  /api/status               состояние, источники, приложения, громкость
 POST /api/discover             повторный поиск проектора
 POST /api/key                  {"key":"KEY_VOLUMEUP"}
-POST /api/source               {"id":"3"}   (3 = HDMI 1, 4 = HDMI 2, 0 = ТВ)
+POST /api/source               {"id":"HDMI_1"}
+GET  /api/apps                 список приложений (getapplist)
+POST /api/app                  {"package":"com.android.tv.settings"}
+POST /api/volume               {"value":10}
+POST /api/mute                 {"muted":true}
+POST /api/play                 {"command":"PLAY"}   (PLAY/PAUSE/FAST_FORWORD/FAST_BACKWORD)
+POST /api/focus                автофокус через меню проектора
 POST /api/wake                 Wake-on-LAN
 GET  /api/screenshot?fresh=1   JPEG-снимок экрана
 POST /api/connect              переподключить MQTT
@@ -168,9 +190,9 @@ curl -X POST http://localhost:3000/api/key \
 | Поле | Назначение |
 |---|---|
 | `ip` | IP проектора |
-| `clientId` | UDN из DLNA без `uuid:` и дефисов |
+| `clientId` | произвольный идентификатор в топиках |
 | `macs` | MAC-адреса для Wake-on-LAN |
-| `sources` | список входов: `id` — `sourceid` из протокола VIDAA |
+| `sources` | список входов: `id` — `HDMI_1` / `HDMI_2` |
 
 Переменные окружения:
 
@@ -179,51 +201,58 @@ curl -X POST http://localhost:3000/api/key \
 | `PORT` | `3000` | Порт веб-пульта |
 | `VIDDA_IP` | автопоиск | IP проектора |
 | `VIDDA_PORT` | `36669` | MQTT-порт проектора |
-| `VIDDA_CLIENT_ID` | автопоиск | UDN без дефисов |
+| `VIDDA_CLIENT_ID` | генерируется | идентификатор в топиках |
 | `VIDDA_USER` | `hisenseservice` | MQTT-логин |
 | `VIDDA_PASS` | `multimqttservice` | MQTT-пароль |
 
 ## Ограничения
 
 - **Громкость.** Проектор не присылает системную громкость ни по MQTT, ни по
-  DLNA (DLNA всегда отдаёт 50). Пульт показывает значение, только если прошивка
-  прислала broadcast; иначе в футере написано «локальная сеть».
-- **Состояние.** Надёжно определяется только смена приложения (`appswitch`) и
-  некоторые broadcast-состояния (`launcher`, `remote_setting`, `sourceswitch`).
-- **Автофокус и избранное.** Точные коды не подтверждены: официальное приложение
-  отправляло эти команды через облако, а не в локальный MQTT. Проверенные
-  `KEY_AUTO_FOCUS`, `KEY_FOCUS`, `KEY_AF`, `KEY_FAV`, `KEY_FAVOURITE`, `KEY_HEART`
-  видимой реакции не дали.
+  DLNA (DLNA всегда отдаёт 50). Пульт отправляет `setvolume`/`setmute`, но не
+  показывает фактическое значение.
+- **Состояние.** Надёжно определяется смена приложения (`appswitch`) и некоторые
+  broadcast-состояния (`launcher`, `remote_setting`, `sourceswitch`).
+- **Автофокус.** Работает только через встроенное меню; отдельного MQTT-кода нет.
+- **Входы.** На проверенной прошивке переключаются только `HDMI_1` и `HDMI_2`.
 - **Включение.** Wake-on-LAN зависит от настроек проектора.
 - **Скриншоты.** Проектор ограничивает частоту снимков: после серии быстрых
   запросов несколько минут возвращает пустой ответ.
 
 ## Как это работает
 
-Проектор держит MQTT-брокер на порту `36669` со статическими кредами:
+Проектор держит MQTT-брокер на порту `36669` (`com.hisense.hiservice`,
+Mosquitto) со статическими кредами:
 
 ```
 username: hisenseservice
 password: multimqttservice
 ```
 
-Команды идут в топик, где `clientId` — это UDN проектора из DLNA-описания без
-`uuid:` и дефисов:
+Команды идут в топик:
 
 ```
-/remoteapp/tv/hiservice_cmd/<clientId>/actions/sendkey
+/remoteapp/tv/hiservice_cmd/<clientId>/actions/<action>
+```
+
+Например:
+
+```
+action:  sendkey
 payload: KEY_SETTING
 ```
 
-Стандартный VIDAA-топик `remote_service/sendkey` на этом проекторе игнорируется.
-Полный разбор протокола, найденные топики и эксперименты — в
+Ответы приходят в `/remoteapp/mobile/<clientId>/hiservice/data/<name>`, состояния
+— в `/remoteapp/mobile/broadcast/...`. Стандартный VIDAA-топик
+`remote_service/sendkey` на этом проекторе игнорируется.
+
+Полный разбор протокола, таблица действий и эксперименты — в
 [docs/PROTOCOL.md](docs/PROTOCOL.md).
 
 ## Структура проекта
 
 ```
 Vidda_remote_cn_node/
-├── server.js              Node.js-сервер, SSDP, MQTT, API
+├── server.js              Node.js-сервер, автопоиск, MQTT, API
 ├── public/                HTML-пульт
 │   ├── index.html
 │   ├── app.js
@@ -248,7 +277,7 @@ python3 -m pip install -r tools/requirements.txt
 python3 tools/send_key.py KEY_SETTING
 python3 tools/screenshot.py -o screen.jpg
 python3 tools/sniff.py -d 60
-python3 tools/probe_key.py KEY_AUTOFOCUS
+python3 tools/probe_key.py KEY_MENU
 python3 tools/wake.py
 ```
 
@@ -261,7 +290,7 @@ python3 tools/wake.py
 
 ## Благодарности
 
-- `pyvidaa` — описание VIDAA-протокола и `changesource`.
+- `pyvidaa` — описание VIDAA-протокола.
 - `vidda_fish` — рабочий топик `hiservice_cmd`.
 - Официальный веб-пульт HiSmart — базовый список `KEY_*`.
 

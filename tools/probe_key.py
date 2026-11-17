@@ -11,7 +11,7 @@ from vidda import TV
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("key", help="например KEY_AUTOFOCUS")
+    parser.add_argument("key", help="например KEY_MENU")
     parser.add_argument("--delay", type=float, default=1.6, help="пауза после нажатия, сек")
     parser.add_argument("--outdir", default="shots", help="куда сохранять снимки")
     args = parser.parse_args()

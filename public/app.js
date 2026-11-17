@@ -20,6 +20,14 @@ const sourceCancel = document.getElementById('sourceCancel');
 const sourceHome = document.getElementById('sourceHome');
 const sourceList = document.getElementById('sourceList');
 
+const focusBtn = document.getElementById('focusBtn');
+
+const appsModal = document.getElementById('appsModal');
+const appsBtn = document.getElementById('appsBtn');
+const appsCancel = document.getElementById('appsCancel');
+const appsRefresh = document.getElementById('appsRefresh');
+const appsList = document.getElementById('appsList');
+
 const connectModal = document.getElementById('connectModal');
 const ipInput = document.getElementById('ipInput');
 const autoFind = document.getElementById('autoFind');
@@ -147,7 +155,6 @@ const KEYBOARD_MAP = {
   h: 'KEY_HOME',
   m: 'KEY_MENU',
   s: 'KEY_SETTING',
-  f: 'KEY_AUTOFOCUS',
   p: 'KEY_POWER',
 };
 
@@ -156,6 +163,7 @@ function anyModalOpen() {
     !powerModal.hidden ||
     !sourceModal.hidden ||
     !connectModal.hidden ||
+    !appsModal.hidden ||
     !screenModal.hidden
   );
 }
@@ -170,7 +178,9 @@ window.addEventListener('keydown', (e) => {
   if (anyModalOpen()) return;
 
   if (e.key === 'i' || e.key === 'I') { openSources(); return; }
+  if (e.key === 'a' || e.key === 'A') { openApps(); return; }
   if (e.key === 'c' || e.key === 'C') { openScreen(); return; }
+  if (e.key === 'f' || e.key === 'F') { runAutoFocus(); return; }
 
   const key = KEYBOARD_MAP[e.key];
   if (!key) return;
@@ -311,6 +321,7 @@ function closeModals() {
   powerModal.hidden = true;
   sourceModal.hidden = true;
   connectModal.hidden = true;
+  appsModal.hidden = true;
   closeScreen();
 }
 
@@ -364,16 +375,15 @@ async function sendSource(source) {
 
 function renderSources() {
   const sources = lastStatus?.sources?.length ? lastStatus.sources : [
-    { id: '3', name: 'HDMI 1' },
-    { id: '4', name: 'HDMI 2' },
-    { id: '0', name: 'ТВ' },
+    { id: 'HDMI_1', name: 'HDMI 1' },
+    { id: 'HDMI_2', name: 'HDMI 2' },
   ];
-  const current = lastStatus?.lastState?.sourceid;
+  const current = lastStatus?.lastSource;
   sourceList.innerHTML = '';
   for (const source of sources) {
     const button = document.createElement('button');
     button.className = 'source-item';
-    if (current !== undefined && String(current) === String(source.id)) {
+    if (current !== undefined && current !== null && String(current) === String(source.id)) {
       button.classList.add('active');
     }
     const label = document.createElement('span');
@@ -401,6 +411,108 @@ sourceHome.addEventListener('click', () => {
 sourceModal.addEventListener('click', (e) => {
   if (e.target === sourceModal) closeModals();
 });
+
+/* ---------- apps ---------- */
+
+let appsBusy = false;
+
+function renderApps(apps) {
+  appsList.innerHTML = '';
+  if (!apps.length) {
+    const empty = document.createElement('p');
+    empty.textContent = 'Проектор не вернул список приложений.';
+    appsList.append(empty);
+    return;
+  }
+  for (const app of apps) {
+    const button = document.createElement('button');
+    button.className = 'source-item app-item';
+    const meta = document.createElement('span');
+    meta.className = 'app-meta';
+    const name = document.createElement('span');
+    name.className = 'app-name';
+    name.textContent = app.name || app.package;
+    const pkg = document.createElement('span');
+    pkg.className = 'app-pkg';
+    pkg.textContent = app.package;
+    meta.append(name, pkg);
+    const icon = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    icon.innerHTML = '<use href="#i-apps"/>';
+    button.append(meta, icon);
+    button.addEventListener('click', () => launchApp(app));
+    appsList.append(button);
+  }
+}
+
+async function loadApps() {
+  if (appsBusy) return;
+  appsBusy = true;
+  appsRefresh.disabled = true;
+  appsList.innerHTML = '';
+  const hint = document.createElement('p');
+  hint.textContent = 'Запрашиваю список приложений…';
+  appsList.append(hint);
+  try {
+    const info = await api('/api/apps');
+    renderApps(info.apps || []);
+  } catch (err) {
+    appsList.innerHTML = '';
+    const error = document.createElement('p');
+    error.textContent = err.message;
+    appsList.append(error);
+  } finally {
+    appsBusy = false;
+    appsRefresh.disabled = false;
+  }
+}
+
+async function launchApp(app) {
+  try {
+    await api('/api/app', {
+      method: 'POST',
+      body: JSON.stringify({ package: app.package }),
+    });
+    toast(`Запускаю: ${app.name || app.package}`);
+    closeModals();
+  } catch (err) {
+    toast(err.message, 'error');
+  }
+}
+
+function openApps() {
+  appsModal.hidden = false;
+  loadApps();
+}
+
+appsBtn.addEventListener('click', openApps);
+appsRefresh.addEventListener('click', loadApps);
+appsCancel.addEventListener('click', closeModals);
+appsModal.addEventListener('click', (e) => {
+  if (e.target === appsModal) closeModals();
+});
+
+/* ---------- autofocus ---------- */
+
+let focusBusy = false;
+
+async function runAutoFocus() {
+  if (focusBusy) return;
+  focusBusy = true;
+  focusBtn.classList.add('pressed');
+  buzz(14);
+  toast('Автофокус: открываю меню проектора…');
+  try {
+    await api('/api/focus', { method: 'POST' });
+    toast('Автофокус запущен');
+  } catch (err) {
+    toast(err.message, 'error');
+  } finally {
+    focusBtn.classList.remove('pressed');
+    focusBusy = false;
+  }
+}
+
+focusBtn.addEventListener('click', runAutoFocus);
 
 /* ---------- projector screen ---------- */
 

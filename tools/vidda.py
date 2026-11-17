@@ -62,13 +62,47 @@ class TV:
         if self.on_event:
             self.on_event(msg.topic, msg.payload)
 
+    def _action(self, action: str, payload: str = "") -> None:
+        topic = f"/remoteapp/tv/hiservice_cmd/{self.cid}/actions/{action}"
+        self.client.publish(topic, payload, qos=0)
+
     def key(self, key: str) -> None:
-        topic = f"/remoteapp/tv/hiservice_cmd/{self.cid}/actions/sendkey"
-        self.client.publish(topic, key, qos=0)
+        self._action("sendkey", key)
 
     def source(self, source_id: str) -> None:
-        topic = f"/remoteapp/tv/ui_service/{self.cid}/actions/changesource"
-        self.client.publish(topic, json.dumps({"sourceid": str(source_id)}), qos=0)
+        """Вход задаётся строкой: HDMI_1, HDMI_2, HDMI_3, HDMI_4, LIVETV, VGA."""
+        self._action("changesource", str(source_id))
+
+    def start_app(self, package: str) -> None:
+        self._action("startapp", json.dumps({"package": package}))
+
+    def request_apps(self) -> None:
+        self._action("getapplist")
+
+    def volume(self, value: int) -> None:
+        self._action("setvolume", str(int(value)))
+
+    def mute(self, muted: bool) -> None:
+        self._action("setmute", "true" if muted else "false")
+
+    def play(self, command: str) -> None:
+        self._action("playcontrol", command.upper())
+
+    def focus(self, delay: float = 0.4) -> None:
+        """Автофокус через встроенное меню проектора."""
+        for key, pause in [
+            ("KEY_HOME", 0.9),
+            ("KEY_SETTING", 1.4),
+            ("KEY_RIGHT", 0.5),
+            ("KEY_DOWN", delay),
+            ("KEY_DOWN", delay),
+            ("KEY_DOWN", delay),
+            ("KEY_DOWN", delay),
+            ("KEY_OK", 0.0),
+        ]:
+            self.key(key)
+            if pause:
+                time.sleep(pause)
 
     def screenshot(self, timeout: float = 6.0) -> bytes | None:
         self._shot = None

@@ -30,6 +30,7 @@
     <symbol id="i-focus" viewBox="0 0 24 24"><path d="M4 8V5.5A1.5 1.5 0 0 1 5.5 4H8M16 4h2.5A1.5 1.5 0 0 1 20 5.5V8M20 16v2.5a1.5 1.5 0 0 1-1.5 1.5H16M8 20H5.5A1.5 1.5 0 0 1 4 18.5V16"/><circle cx="12" cy="12" r="3.4"/><path d="M9.4 12h5.2"/></symbol>
     <symbol id="i-heart" viewBox="0 0 24 24"><path d="M12 20.2S4.4 15.7 4.4 10.6A4.4 4.4 0 0 1 12 7.4a4.4 4.4 0 0 1 7.6 3.2c0 5.1-7.6 9.6-7.6 9.6z"/></symbol>
     <symbol id="i-input" viewBox="0 0 24 24"><rect x="2.8" y="7" width="18.4" height="10" rx="2.4"/><path d="M7.5 10.5v3M11 10v4M14.5 10.5v3M18 10.5v3"/></symbol>
+    <symbol id="i-apps" viewBox="0 0 24 24"><rect x="4" y="4" width="6.5" height="6.5" rx="1.4"/><rect x="13.5" y="4" width="6.5" height="6.5" rx="1.4"/><rect x="4" y="13.5" width="6.5" height="6.5" rx="1.4"/><rect x="13.5" y="13.5" width="6.5" height="6.5" rx="1.4"/></symbol>
     <symbol id="i-camera" viewBox="0 0 24 24"><path d="M4 8h3l1.5-2.2h7L17 8h3a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1H4a1 1 0 0 1-1-1V9a1 1 0 0 1 1-1z"/><circle cx="12" cy="13" r="3.2"/></symbol>
     <symbol id="i-wake" viewBox="0 0 24 24"><path d="M12 3v4M5.6 6.6l2.8 2.8M3 13h4M21 13h-4M18.4 6.6l-2.8 2.8"/><path d="M7 17h10M4.5 21h15"/></symbol>
     <symbol id="i-close" viewBox="0 0 24 24"><path d="M6 6l12 12M18 6L6 18"/></symbol>
@@ -99,13 +100,13 @@
         <svg><use href="#i-gear"/></svg>
         <span>Настройки</span>
       </button>
-      <button class="key tile wide" data-key="KEY_AUTOFOCUS" aria-label="Автофокус">
+      <button class="key tile wide" id="focusBtn" aria-label="Автофокус">
         <svg><use href="#i-focus"/></svg>
         <span>Автофокус</span>
       </button>
-      <button class="key tile wide" data-key="KEY_FAVORITE" aria-label="Избранное">
-        <svg><use href="#i-heart"/></svg>
-        <span>Избранное</span>
+      <button class="key tile wide" id="appsBtn" aria-label="Приложения">
+        <svg><use href="#i-apps"/></svg>
+        <span>Приложения</span>
       </button>
       <button class="key tile wide" id="sourceBtn" aria-label="Переключение входов">
         <svg><use href="#i-input"/></svg>
@@ -142,11 +143,25 @@
     <div class="modal-card">
       <div class="modal-icon neutral"><svg><use href="#i-input"/></svg></div>
       <h2>Источник сигнала</h2>
-      <p>Переключение входа по локальной сети. Список можно изменить в <code>config.json</code>. Если вход не переключился — открой домашний экран и выбери HDMI в боковой панели.</p>
+      <p>Переключение входа командой <code>changesource</code>. Список можно изменить в <code>config.json</code>. Если вход не переключился — открой домашний экран и выбери HDMI в боковой панели.</p>
       <div class="source-list" id="sourceList"></div>
       <div class="modal-actions">
         <button class="btn ghost" id="sourceHome">Домой</button>
         <button class="btn ghost" id="sourceCancel">Отмена</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Приложения -->
+  <div class="modal" id="appsModal" hidden>
+    <div class="modal-card">
+      <div class="modal-icon neutral"><svg><use href="#i-apps"/></svg></div>
+      <h2>Приложения проектора</h2>
+      <p>Список получен командой <code>getapplist</code>. Нажми на приложение, чтобы запустить его через <code>startapp</code>.</p>
+      <div class="source-list app-list" id="appsList"></div>
+      <div class="modal-actions">
+        <button class="btn ghost" id="appsRefresh"><svg class="btn-icon"><use href="#i-refresh"/></svg>Обновить</button>
+        <button class="btn ghost" id="appsCancel">Отмена</button>
       </div>
     </div>
   </div>
