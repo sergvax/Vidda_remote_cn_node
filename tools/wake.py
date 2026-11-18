@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Отправить Wake-on-LAN magic packet на MAC-адреса проектора."""
+"""Отправить Wake-on-LAN magic packet на MAC-адреса проектора.
+
+На проверенной прошивке (V0000.00.01R.P1228) Wi-Fi wakeup отключён
+(network_wakeup=0), поэтому проектор на пакет не реагирует. Скрипт оставлен для
+моделей, где сетевое ожидание действительно включено.
+"""
 
 import argparse
 import socket

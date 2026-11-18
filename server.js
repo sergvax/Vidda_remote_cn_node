@@ -101,6 +101,9 @@ const state = {
   apps: [],
   favorites: [],
   lastSource: null,
+  // Экран/лазер выключен командой setlaserscreenstate: проектор остаётся в сети.
+  screenOff: false,
+  btAddress: null,
 };
 
 let mqttClient = null;
@@ -625,6 +628,8 @@ function connectMqtt() {
 
   mqttClient.on('close', () => {
     state.mqttConnected = false;
+    // Связи нет — состояние экрана неизвестно, не показываем устаревшее значение.
+    state.screenOff = false;
   });
 
   mqttClient.on('error', (err) => {
@@ -658,9 +663,12 @@ function handleMessage(topic, payload) {
   if (topic.endsWith('/hiservice/data/sendcastinfo')) {
     try {
       const data = JSON.parse(text);
-      const mac = data.btAddress || data.mac || null;
-      if (mac && !state.macs.includes(mac)) {
-        state.macs = [...new Set([...state.macs, mac])];
+      // btAddress — это Bluetooth-адрес, а не Wi-Fi MAC. Для WoL он не годится,
+      // поэтому в macs его не добавляем.
+      if (data.btAddress) state.btAddress = String(data.btAddress);
+      const wifiMac = data.wifiMac || data.wlanMac || data.mac || null;
+      if (wifiMac && !state.macs.includes(wifiMac)) {
+        state.macs = [...new Set([...state.macs, wifiMac])];
         saveConfig();
       }
     } catch {
@@ -962,6 +970,19 @@ function subnetBroadcast(ip) {
   return `${ip.split('.').slice(0, 3).join('.')}.255`;
 }
 
+/**
+ * Экран/лазер. На этой прошивке Wi-Fi Wake-on-LAN не поддерживается
+ * (в DLNA-конфиге network_wakeup=0), зато setlaserscreenstate гасит картинку,
+ * не переводя проектор в standby: MQTT и сеть продолжают работать.
+ */
+function setLaserScreen(on) {
+  assertConnected();
+  const topic = actionTopic('setlaserscreenstate');
+  mqttClient.publish(topic, on ? 'true' : 'false', { qos: 0 });
+  state.screenOff = !on;
+  return { topic, on };
+}
+
 async function wake() {
   if (!state.macs.length) {
     throw Object.assign(
@@ -1107,6 +1128,8 @@ const server = http.createServer(async (req, res) => {
         screenshotAt: state.screenshotAt,
         lastState: state.lastState,
         lastSource: state.lastSource,
+        screenOff: state.screenOff,
+        btAddress: state.btAddress,
         appsCount: state.apps.length,
         favorites: favoriteApps(),
         maxFavorites: MAX_FAVORITES,
@@ -1194,9 +1217,22 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, { ok: true, ...result });
     }
 
+    if (url.pathname === '/api/screen' && req.method === 'POST') {
+      const body = await readBody(req);
+      const on = body.on === true || body.on === 1 || body.on === 'true' || body.on === '1';
+      const result = setLaserScreen(on);
+      return json(res, 200, { ok: true, ...result });
+    }
+
     if (url.pathname === '/api/wake' && req.method === 'POST') {
+      // Если экран выключен из пульта — возвращаем изображение по MQTT.
+      // Wake-on-LAN остаётся запасным вариантом для настоящего standby.
+      if (state.screenOff && state.mqttConnected) {
+        const result = setLaserScreen(true);
+        return json(res, 200, { ok: true, method: 'screen', ...result });
+      }
       const sent = await wake();
-      return json(res, 200, { ok: true, sent });
+      return json(res, 200, { ok: true, method: 'wol', sent });
     }
 
     if (url.pathname === '/api/screenshot' && req.method === 'GET') {

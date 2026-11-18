@@ -149,11 +149,12 @@
     <div class="modal-card">
       <div class="modal-icon"><svg><use href="#i-power"/></svg></div>
       <h2>Питание</h2>
-      <p>«Включить» отправляет Wake-on-LAN: проектор должен быть в сети и с включённым сетевым ожиданием. «Выключить» — обычная команда питания.</p>
+      <p>«Выключить экран» гасит изображение и лазер, но оставляет проектор в сети — поэтому «Включить» срабатывает сразу. «Полный standby» экономит больше энергии, но удалённо разбудить проектор нельзя: эта прошивка не поддерживает Wake-on-LAN.</p>
       <div class="modal-actions">
         <button class="btn accent" id="wakeBtn"><svg class="btn-icon"><use href="#i-wake"/></svg>Включить</button>
-        <button class="btn danger" id="powerConfirm">Выключить</button>
+        <button class="btn" id="screenOffBtn">Выключить экран</button>
       </div>
+      <button class="btn danger wide" id="powerConfirm">Полный standby</button>
       <button class="btn ghost wide" id="powerCancel">Отмена</button>
     </div>
   </div>

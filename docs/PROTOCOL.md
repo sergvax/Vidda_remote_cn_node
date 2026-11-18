@@ -46,9 +46,10 @@
    адресам своей `/24`.
 
 Найденный кандидат проверяется командой `getcastinfo`: проектор присылает
-`sendcastinfo` с моделью, именем и MAC (`btAddress`). MAC сразу сохраняется для
-Wake-on-LAN. Если автопоиск ничего не нашёл, IP можно ввести вручную — в окне
-подключения или через переменную `VIDDA_IP`.
+`sendcastinfo` с моделью и именем. Поле `btAddress` — это Bluetooth-адрес, а не
+Wi-Fi MAC, поэтому для Wake-on-LAN оно не используется. Если автопоиск ничего не
+нашёл, IP можно ввести вручную — в окне подключения или через переменную
+`VIDDA_IP`.
 
 ## Брокер
 
@@ -286,14 +287,58 @@ payload: JPEG (FF D8 ...)
 восстанавливается. Поэтому в пульте нет автообновления: снимок делается при
 открытии окна и по кнопке «Обновить».
 
-## Питание и Wake-on-LAN
+## Питание, экран и Wake-on-LAN
 
-`KEY_POWER` только выключает/переводит в сон. Когда проектор выключен, MQTT
-недоступен, поэтому включить его командой нельзя.
+### Что доступно через hiservice
 
-Пульт отправляет **Wake-on-LAN** magic packet на MAC, полученный из
-`sendcastinfo` (`btAddress`), широковещательно на порты 9 и 7. Проверено: после
-magic packet проектор отвечает на ping и открывает порт `36669`.
+Полный список действий диспетчера `HiServiceCmdMqttClient.onMessageReceived`:
+
+```
+sendkey, input, screenshot, voice, deviceconnect, changetvname, lastwill,
+tvscreenstate, getcastinfo, changesource, initbluetooth, bluetoothconnectstate,
+playcontrol, setvolume, setmute, changeaudiooutput, getapplist, startapp,
+startpage, setlaserscreenstate, changelasertvinstallation, changeimagemode
+```
+
+- `setlaserscreenstate` (`true`/`false`) — гасит и возвращает изображение/лазер,
+  не переводя устройство в standby. MQTT и сеть продолжают работать.
+- `tvscreenstate` (`SET_TV_SCREEN_ON`) — в обычном режиме только сообщает
+  состояние. В fake standby отправляет broadcast `com.hisense.wow_state.exit`.
+- `KEY_POWER` — настоящий standby: Wi-Fi и MQTT отключаются.
+
+### Почему Wake-on-LAN не работает
+
+Действие `deviceconnect` возвращает DLNA-конфиг (`multiconfig`) и состояние
+fake standby. На проверенном экземпляре:
+
+```
+fakestandbystate false
+network_wakeup=0
+```
+
+`network_wakeup` формируется в `TVInforUtils.getfilenContent()` из свойства
+`ro.his.tv.wifi_wakeup_support`: если оно не равно `1`, флаг принудительно
+сбрасывается в `0`. Значение `0` в ответе означает, что Wi-Fi пробуждение
+отключено на уровне прошивки, а не настройки пользователя.
+
+Дополнительно проверено:
+
+- `sendcastinfo` отдаёт только `btAddress` — это Bluetooth-адрес, а не Wi-Fi MAC.
+- Wi-Fi MAC виден в `About → Info`; magic packet на него и на соседние адреса
+  того же чипа, на порты `9`/`7`, broadcast и unicast, при выключенном проекторе
+  не пробуждает его.
+- Пункта «网络唤醒» / Wake on LAN в быстром меню нет; в `General → ON/OFF`
+  доступны только Startup Source, Startup Image, Sleep Timer, Standby,
+  Standby/Power-on Light Effects и On and Start.
+
+Поэтому пульт использует `setlaserscreenstate` как рабочее «выключение»:
+устройство остаётся в сети, а «Включить» возвращает изображение по MQTT.
+
+### Запасной вариант
+
+`wake()` в `server.js` по-прежнему умеет отправлять magic packet на адреса из
+`macs` — для других моделей, где `network_wakeup=1`. Если экран был выключен
+через пульт, `/api/wake` вместо этого включает его по MQTT.
 
 ## Что пробовалось и не сработало
 
@@ -327,4 +372,5 @@ magic packet проектор отвечает на ping и открывает �
 2. Проверить `playcontrol` и `startpage` на экране с видео.
 3. Найти способ перехватить облачные запросы официального приложения — там
    могут быть точные действия для фокуса и избранного.
-4. Проверить Wake-on-LAN после включения `Network Standby` в настройках.
+4. Проверить `setlaserscreenstate` на других моделях: на одних он гасит только
+   матрицу, на других — лазер целиком.

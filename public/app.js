@@ -13,6 +13,7 @@ const powerBtn = document.getElementById('powerBtn');
 const powerCancel = document.getElementById('powerCancel');
 const powerConfirm = document.getElementById('powerConfirm');
 const wakeBtn = document.getElementById('wakeBtn');
+const screenOffBtn = document.getElementById('screenOffBtn');
 
 const sourceModal = document.getElementById('sourceModal');
 const sourceBtn = document.getElementById('sourceBtn');
@@ -336,7 +337,7 @@ function setStatus(info) {
   }
   if (info.mqttConnected) {
     dot.className = 'dot online';
-    statusText.textContent = 'онлайн';
+    statusText.textContent = info.screenOff ? 'экран выключен' : 'онлайн';
   } else {
     dot.className = 'dot offline';
     statusText.textContent = 'офлайн';
@@ -507,7 +508,19 @@ powerModal.addEventListener('click', (e) => {
 powerConfirm.addEventListener('click', () => {
   closeModals();
   sendKey('KEY_POWER');
-  toast('Команда выключения отправлена');
+  toast('Полный standby: включить можно только родным пультом');
+});
+
+screenOffBtn.addEventListener('click', async () => {
+  closeModals();
+  buzz(20);
+  playClick();
+  try {
+    await api('/api/screen', { method: 'POST', body: JSON.stringify({ on: false }) });
+    toast('Экран выключен, проектор остаётся в сети');
+  } catch (err) {
+    toast(err.message, 'error');
+  }
 });
 
 wakeBtn.addEventListener('click', async () => {
@@ -516,7 +529,11 @@ wakeBtn.addEventListener('click', async () => {
   playClick();
   try {
     const info = await api('/api/wake', { method: 'POST' });
-    toast(`Wake-on-LAN отправлен (${info.sent.length})`);
+    if (info.method === 'screen') {
+      toast('Экран включён');
+    } else {
+      toast(`Wake-on-LAN отправлен (${info.sent.length}). Если проектор в полном standby, эта прошивка его не разбудит.`, 'error');
+    }
   } catch (err) {
     toast(err.message, 'error');
   }
